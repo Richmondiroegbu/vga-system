@@ -1,0 +1,1 @@
+"""VGA prompt template modules."""

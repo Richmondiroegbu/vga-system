@@ -1,0 +1,53 @@
+# VGA v17.2 — Runtime Dependencies
+# RTX 5090 (Blackwell sm_120): use cu128 index and PyTorch >=2.7.0
+# Install: pip install -r requirements.txt --index-url https://download.pytorch.org/whl/cu128
+
+# Core ML — PyTorch 2.7.0 minimum for RTX 5090 Blackwell sm_120 support
+torch>=2.7.0
+torchvision
+torchaudio>=2.7.0
+# diffusers/transformers/accelerate unpinned — 5090 support needs latest versions
+diffusers>=0.30.0
+transformers>=4.45.0
+accelerate>=0.34.0
+peft>=0.12.0
+safetensors>=0.4.3
+open-clip-torch>=2.24.0
+
+# Image / Video
+Pillow>=10.0.0
+numpy>=1.24.0
+opencv-python>=4.9.0
+decord
+einops
+omegaconf
+
+# Audio
+pydub>=0.25.0
+ffmpeg-python>=0.2.0
+soundfile
+scipy
+audiocraft
+
+# LLM extras
+unsloth
+bitsandbytes
+sentencepiece
+protobuf>=3.20.0,<5.0.0
+
+# Face / Identity
+mediapipe
+face-alignment
+
+# Web / API
+fastapi>=0.115.0
+uvicorn>=0.30.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+streamlit>=1.30.0
+
+# System / Utility
+python-dotenv>=1.0.0
+psutil>=5.9.0
+requests>=2.31.0
+paramiko

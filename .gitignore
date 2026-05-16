@@ -1,0 +1,24 @@
+# Secrets — never commit
+controller_config.json
+.env
+.env_vga
+*.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Dev tools
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Logs and outputs
+*.jsonl
+devtools_reports/
+snapshots/
