@@ -294,7 +294,7 @@ def install_dependencies() -> None:
 
     # 2d. LoRA / weights
     pip("peft==0.12.0")
-    pip("safetensors>=0.8.0")   # diffusers>=0.38 requires >=0.8.0 (was 0.4.3, too old)
+    pip("safetensors>=0.8.0rc0")  # 0.8.0 stable not yet on PyPI; rc0 satisfies diffusers>=0.8.0-rc.0
 
     # 2e. Performance — xformers from cu128 index.
     # NOTE on RTX 5090 (sm_120): xformers installs but may not activate memory-efficient
