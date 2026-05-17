@@ -11,13 +11,13 @@ diffusers>=0.30.0
 transformers>=4.45.0
 accelerate>=0.34.0
 peft>=0.12.0
-safetensors>=0.4.3
+safetensors>=0.8.0
 open-clip-torch>=2.24.0
 
 # Image / Video
 Pillow>=10.0.0
 numpy>=1.24.0
-opencv-python>=4.9.0
+opencv-python>=4.9.0.80
 decord
 einops
 omegaconf

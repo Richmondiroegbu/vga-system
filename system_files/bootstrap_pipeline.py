@@ -184,6 +184,14 @@ def system_setup() -> None:
     """Phase 1: system packages + workspace directory structure + disk check."""
     log.info("=== PHASE 1: SYSTEM PREPARATION ===")
 
+    # 1-pre. Bootstrap prerequisites — must exist before Phase 1 uses them.
+    # psutil is used in _check_disk_space() (Phase 1) before Phase 2 installs deps.
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "psutil", "--quiet"],
+        check=True,
+    )
+    log.info("[phase1] Bootstrap prerequisites (psutil) installed.")
+
     # 1a. apt packages
     log.info("[phase1] Installing system packages …")
     subprocess.run(["apt-get", "update", "-qq"], check=True)
@@ -286,7 +294,7 @@ def install_dependencies() -> None:
 
     # 2d. LoRA / weights
     pip("peft==0.12.0")
-    pip("safetensors==0.4.3")
+    pip("safetensors>=0.8.0")   # diffusers>=0.38 requires >=0.8.0 (was 0.4.3, too old)
 
     # 2e. Performance — xformers from cu128 index.
     # NOTE on RTX 5090 (sm_120): xformers installs but may not activate memory-efficient
@@ -317,7 +325,7 @@ def install_dependencies() -> None:
                     "flash-attn==2.8.0.post2", "--no-build-isolation", "--quiet",
                 ],
                 check=True,
-                timeout=600,  # compile can take several minutes
+                timeout=1800,  # compile takes 15-30 min on server GPUs; was 600 (timed out)
             )
             log.info("[phase2] flash-attn installed successfully.")
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
@@ -333,7 +341,7 @@ def install_dependencies() -> None:
 
     # 2g. Vision
     pip("open-clip-torch==2.24.0")
-    pip("opencv-python==4.9.0")
+    pip("opencv-python>=4.9.0")   # 4.9.0 exact does not exist on PyPI; correct is 4.9.0.80+
     pip("Pillow>=10.0.0", "numpy>=1.24.0")
 
     # 2h. Audio
