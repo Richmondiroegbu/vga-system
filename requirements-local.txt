@@ -1,0 +1,7 @@
+# VGA v17.2 — Local Windows machine requirements
+# Only needed to run session_controller.py and AVON watcher locally.
+# The full requirements.txt is for the RunPod GPU server (Linux).
+
+paramiko>=3.0.0
+requests>=2.31.0
+python-dotenv>=1.0.0
