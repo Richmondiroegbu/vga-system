@@ -1019,9 +1019,11 @@ MIN_FILE_COUNTS = {
 
 DIFFUSION_SUBCOMPONENTS: dict[str, dict] = {
     "flux2": {
+        # FLUX.2-klein-4B layout: tokenizer is in tokenizer/ dir, NOT inside text_encoder/.
+        # text_encoder/ contains only config.json + safetensors shards (no tokenizer.json).
         "vae":          {"required_files": ["config.json"],
                          "weight_patterns": ["*.safetensors"]},
-        "text_encoder": {"required_files": ["config.json", "tokenizer.json"],
+        "text_encoder": {"required_files": ["config.json"],
                          "weight_patterns": ["*.safetensors"]},
         "scheduler":    {"required_files": ["scheduler_config.json"]},
     },
