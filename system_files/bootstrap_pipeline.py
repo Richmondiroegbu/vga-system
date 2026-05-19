@@ -335,12 +335,12 @@ def install_dependencies() -> None:
     # 2i. HuggingFace download
     pip("huggingface-hub>=0.21.0", "hf-transfer>=0.1.6")
 
-    # 2j. System + API — unpinned upper bound so pip resolves compatible versions.
-    # fastapi==0.115.0 + pydantic==2.0.0 conflict: fastapi>=0.115 requires pydantic>=2.4.
+    # 2j. System + API + UI
     pip(
         "psutil>=5.9.0", "requests>=2.31.0",
         "fastapi>=0.115.0", "uvicorn>=0.30.0", "pydantic>=2.4.0",
         "pydantic-settings>=2.0.0",
+        "streamlit>=1.30.0",       # Streamlit UI for HRG review panels
         "omegaconf>=2.3.0",
         "python-dotenv>=1.0.0",
     )
