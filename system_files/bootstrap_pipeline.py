@@ -867,9 +867,11 @@ def _download_asset(key: str) -> bool:
                         else None
                     )
                 if not repo_id:
-                    log.warning(f"[{key}] repo_id not configured — skipping.")
-                    clear_state(key)
-                    return False
+                    # Optional user LoRA not configured — treat as skipped (success),
+                    # not as failure. lora_identity and lora_style are user-supplied.
+                    log.info(f"[{key}] repo_id not configured — optional, skipping (OK).")
+                    mark_complete(key)   # mark as complete so manifest counts it as passed
+                    return True
                 _snapshot_download(
                     repo_id,
                     cfg["local_dir"],
