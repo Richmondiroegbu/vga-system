@@ -101,8 +101,8 @@ def _build_logger() -> logging.Logger:
     logger.addHandler(sh)
 
     # File — structured JSON
-    os.makedirs(os.path.dirname("session_controller.log"), exist_ok=True)
-    fh = logging.FileHandler("session_controller.log", mode="a")
+    _log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "session_controller.log")
+    fh = logging.FileHandler(_log_path, mode="a")
     fh.setFormatter(_JsonFormatter())
     logger.addHandler(fh)
 
