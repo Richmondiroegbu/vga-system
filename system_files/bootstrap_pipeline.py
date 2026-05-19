@@ -101,6 +101,12 @@ log = logging.getLogger("bootstrap")
 #               build_bootstrap_env_exports())
 # ─────────────────────────────────────────────────────────────────────────────
 HF_TOKEN            = os.environ.get("HUGGING_FACE_HUB_TOKEN", "")
+
+# Ensure HF_TOKEN is active for all huggingface_hub calls in this process.
+# Without this, downloads are unauthenticated, rate-limited, and slower.
+if HF_TOKEN:
+    os.environ["HUGGING_FACE_HUB_TOKEN"] = HF_TOKEN
+    os.environ["HUGGING_FACE_HUB_TOKEN_PATH"] = ""   # prevent file-based override
 LORA_IDENTITY_REPO  = os.environ.get("LORA_IDENTITY_REPO",  "")
 LORA_STYLE_REPO     = os.environ.get("LORA_STYLE_REPO",     "")
 SVI_LORA_REPO       = os.environ.get("SVI_LORA_REPO",       "vita-video-gen/svi-model")
@@ -293,7 +299,7 @@ def install_dependencies() -> None:
     pip("accelerate>=0.34.0")
 
     # 2d. LoRA / weights
-    pip("peft==0.12.0")
+    pip("peft>=0.17.0")   # Z-Image-Turbo (diffusers) requires >=0.17.0; was pinned to 0.12.0
     pip("safetensors>=0.8.0rc0")  # 0.8.0 stable not yet on PyPI; rc0 satisfies diffusers>=0.8.0-rc.0
 
     # 2e. Performance — xformers from cu128 index.
