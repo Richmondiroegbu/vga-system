@@ -311,33 +311,12 @@ def install_dependencies() -> None:
             "No performance loss on RTX 5090.", exc
         )
 
-    # 2f. FlashAttention — must be compiled, no-build-isolation required.
-    # v7.1: Pre-check GPU compute capability (requires >= 8.0 / Ampere+)
-    # before attempting the expensive compile to avoid silent failures.
-    # SVI svi_wan22 branch tested with flash_attn==2.8.0.post2
-    log.info("[phase2] Checking GPU for FlashAttention compatibility …")
-    if _check_flash_attn_eligibility():
-        log.info("[phase2] Installing flash-attn==2.8.0.post2 (compiled) …")
-        try:
-            subprocess.run(
-                [
-                    sys.executable, "-m", "pip", "install",
-                    "flash-attn==2.8.0.post2", "--no-build-isolation", "--quiet",
-                ],
-                check=True,
-                timeout=1800,  # compile takes 15-30 min on server GPUs; was 600 (timed out)
-            )
-            log.info("[phase2] flash-attn installed successfully.")
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-            log.warning(
-                f"[phase2] flash-attn install failed ({exc}) — "
-                "will use fallback attention (non-fatal)."
-            )
-    else:
-        log.warning(
-            "[phase2] GPU compute capability < 8.0 — "
-            "skipping flash-attn (incompatible hardware). Fallback attention will be used."
-        )
+    # 2f. FlashAttention — SKIPPED for PyTorch 2.11+.
+    # flash-attn 2.8.0.post2 requires PyTorch <=2.7 and consistently times out
+    # during compilation on this stack. PyTorch 2.11 ships native SDPA (scaled
+    # dot-product attention) for sm_120 which provides equivalent performance
+    # without any compilation step. No action needed.
+    log.info("[phase2] Skipping flash-attn — PyTorch 2.11 native SDPA used instead (sm_120 OK).")
 
     # 2g. Vision
     pip("open-clip-torch==2.24.0")
@@ -350,10 +329,12 @@ def install_dependencies() -> None:
     # 2i. HuggingFace download
     pip("huggingface-hub>=0.21.0", "hf-transfer>=0.1.6")
 
-    # 2j. System + API
+    # 2j. System + API — unpinned upper bound so pip resolves compatible versions.
+    # fastapi==0.115.0 + pydantic==2.0.0 conflict: fastapi>=0.115 requires pydantic>=2.4.
     pip(
-        "psutil==5.9.0", "requests==2.31.0",
-        "fastapi==0.115.0", "uvicorn==0.30.0", "pydantic==2.0.0",
+        "psutil>=5.9.0", "requests>=2.31.0",
+        "fastapi>=0.115.0", "uvicorn>=0.30.0", "pydantic>=2.4.0",
+        "pydantic-settings>=2.0.0",
         "omegaconf>=2.3.0",
         "python-dotenv>=1.0.0",
     )
