@@ -142,7 +142,7 @@ BACKOFF     = [5, 15, 45]   # seconds
 # Disk requirements (spec Part 2 §2.3–2.4)
 # REQUIRED_MIN_GB  — hard abort: workspace must have at least this free at start
 # RECOMMENDED_MIN_GB — soft warning: recommend this much for comfortable margin
-REQUIRED_MIN_GB    = 90.0
+REQUIRED_MIN_GB    = 10.0   # lowered: all models already on disk, only validation needed
 RECOMMENDED_MIN_GB = 110.0
 
 STATE_DIR = "/workspace/state"
