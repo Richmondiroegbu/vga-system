@@ -700,7 +700,7 @@ SYSTEM_ASSET_REGISTRY: dict[str, dict] = {
 
 ASSET_DEPENDENCIES: dict[str, list[str]] = {
     # svi_core removed — VGA only needs the two LoRA files (svi_high_noise, svi_low_noise)
-    "flux2":            ["clip", "lora_identity"],
+    "flux2":            ["clip"],   # lora_identity removed — optional user LoRA, not required for flux2
     "zimage":           ["clip", "lora_consistency"],
     "wan22":            ["clip"],
     "latentsync":       [],
@@ -999,7 +999,7 @@ MIN_FILE_COUNTS = {
     "qwen":             5,
     "flux2":            4,
     "zimage":           4,
-    "wan22":            4,
+    "wan22":            2,   # nalexand FP8 layout: VAE.pth + T5.pth at root + model subdirs
     # svi_core removed from registry
     "latentsync":       3,
     "cosyvoice":        3,
@@ -1024,11 +1024,10 @@ DIFFUSION_SUBCOMPONENTS: dict[str, dict] = {
                       "weight_patterns": ["*.safetensors"]},
         "scheduler": {"required_files": ["scheduler_config.json"]},
     },
-    "wan22": {
-        "vae":       {"required_files": ["config.json"],
-                      "weight_patterns": ["*.safetensors"]},
-        "scheduler": {"required_files": ["scheduler_config.json"]},
-    },
+    # wan22 (nalexand/Wan2.2-I2V-A14B-FP8) uses non-diffusers layout:
+    # Wan2.1_VAE.pth + models_t5_umt5-xxl-enc-bf16.pth at root,
+    # high_noise_model_fp8/ and low_noise_model_fp8/ as subdirs.
+    # No vae/ or scheduler/ subdirectory — removed from subcomponent checks.
 }
 
 
