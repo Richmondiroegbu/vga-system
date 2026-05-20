@@ -153,11 +153,20 @@ class SVIGenerationRecord(BaseModel):
 class CharacterDescription(BaseModel):
     """Character visual description for script and identity design."""
 
-    character_id: str
-    name: str
+    character_id: Optional[str] = None   # Qwen uses 'name' not 'character_id'
+    name: str = "main_character"
     age_range: str = ""
     appearance: str = ""
-    emotional_arc: str = ""       # optional — Qwen may omit this field
+    emotional_arc: str = ""
+    role: str = ""                        # Qwen sometimes uses 'role' instead of other fields
+    description: str = ""                 # Qwen sometimes uses 'description'
+
+    @model_validator(mode="after")
+    def ensure_character_id(self) -> "CharacterDescription":
+        """Auto-generate character_id from name if Qwen didn't provide it."""
+        if not self.character_id:
+            self.character_id = self.name.lower().replace(" ", "_").replace("'", "")
+        return self
 
 
 class SceneDescription(BaseModel):
