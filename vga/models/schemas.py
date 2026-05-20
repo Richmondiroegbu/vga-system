@@ -172,31 +172,46 @@ class CharacterDescription(BaseModel):
 class SceneDescription(BaseModel):
     """Scene-level description from script."""
 
-    scene_id: Optional[str] = None      # Qwen may use scene_number instead
+    scene_id: Optional[str] = None
     scene_number: int = 1
-    title: str = ""                     # optional — Qwen may omit
-    description: str
-    emotional_tone: str = "hopeful"     # default if Qwen omits
+    title: str = ""
+    description: str = ""              # Qwen sometimes uses scene_description/summary/content
+    scene_description: str = ""        # Qwen variant 1
+    summary: str = ""                  # Qwen variant 2
+    content: str = ""                  # Qwen variant 3
+    emotional_tone: str = "hopeful"
     duration_hint_s: Optional[float] = None
 
     @model_validator(mode="after")
-    def ensure_scene_id(self) -> "SceneDescription":
-        """Auto-generate scene_id from scene_number if Qwen didn't provide it."""
+    def normalise(self) -> "SceneDescription":
+        """Normalise Qwen's varying field names into standard fields."""
         if not self.scene_id:
             self.scene_id = f"scene_{self.scene_number:03d}"
+        # Populate description from any synonym Qwen used
+        if not self.description:
+            self.description = (
+                self.scene_description or self.summary or self.content
+                or self.title or f"Scene {self.scene_number}"
+            )
         return self
 
 
 class ScriptSchema(BaseModel):
     """Output of ScriptAgent (S-01). schema_version v6.0."""
 
-    job_id: str = ""                    # filled in by ScriptAgent if Qwen omits it
+    job_id: str = ""
     title: str = "Untitled Story"
     logline: str = ""
     characters: List[CharacterDescription] = []
     scenes: List[SceneDescription] = []
     total_duration_estimate_s: float = 60.0
     schema_version: str = "v6.0"
+
+    @model_validator(mode="after")
+    def force_schema_version(self) -> "ScriptSchema":
+        """Always use v6.0 regardless of what the LLM outputs."""
+        self.schema_version = "v6.0"
+        return self
 
 
 class SegmentPlanSchema(BaseModel):
