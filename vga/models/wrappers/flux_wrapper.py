@@ -157,14 +157,14 @@ class FluxWrapper:
     def _infer_with_image(
         self, image: "PIL.Image.Image", prompt: str
     ) -> "PIL.Image.Image":
-        """Run FLUX image-to-image inference."""
+        """Run FLUX inference with LoRA — Flux2KleinPipeline is T2I only.
+        The Consistance LoRA handles reference-image consistency; no strength param."""
         import torch
         result = self._pipe(
-            image=image,
             prompt=prompt,
             guidance_scale=settings.FLUX_CFG,
             num_inference_steps=settings.FLUX_STEPS,
-            strength=0.7,
+            generator=torch.Generator().manual_seed(42),
         )
         return result.images[0]
 
