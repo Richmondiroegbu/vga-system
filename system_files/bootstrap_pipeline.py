@@ -332,8 +332,10 @@ def install_dependencies() -> None:
     # 2h. Audio
     pip("pydub==0.25.0", "ffmpeg-python==0.2.0")
 
-    # 2i. HuggingFace download
+    # 2i. HuggingFace download + LLM quantization
     pip("huggingface-hub>=0.21.0", "hf-transfer>=0.1.6")
+    pip("bitsandbytes>=0.46.1")    # Required for Qwen 4-bit quantization (bnb)
+    pip("unsloth", "sentencepiece") # Qwen unsloth loader
 
     # 2j. System + API + UI
     pip(
