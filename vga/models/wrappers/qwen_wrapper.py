@@ -119,21 +119,29 @@ class QwenWrapper:
             raise ModelLoadError(f"QwenWrapper inference failed: {exc}") from exc
 
     def _ensure_loaded(self) -> None:
-        """Lazy-load the Qwen model."""
+        """Lazy-load the Qwen model using BitsAndBytesConfig for 4-bit quantization."""
         if self._model is not None:
             return
         try:
-            from transformers import AutoModelForCausalLM, AutoTokenizer
+            from transformers import (
+                AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+            )
             path = str(settings.QWEN_MODEL_PATH)
             logger.info("QwenWrapper: loading model from %s", path)
             self._tokenizer = AutoTokenizer.from_pretrained(path)
+            # Use BitsAndBytesConfig — load_in_4bit=True direct arg is deprecated
+            bnb_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype="bfloat16",
+            )
             self._model = AutoModelForCausalLM.from_pretrained(
                 path,
-                torch_dtype="auto",
+                quantization_config=bnb_config,
                 device_map="auto",
-                load_in_4bit=True,
             )
-            logger.info("QwenWrapper: model loaded")
+            logger.info("QwenWrapper: model loaded (4-bit BNB)")
         except Exception as exc:
             raise ModelLoadError(f"QwenWrapper failed to load: {exc}") from exc
 

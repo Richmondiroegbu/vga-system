@@ -334,8 +334,10 @@ def install_dependencies() -> None:
 
     # 2i. HuggingFace download + LLM quantization
     pip("huggingface-hub>=0.21.0", "hf-transfer>=0.1.6")
-    pip("bitsandbytes>=0.46.1")    # Required for Qwen 4-bit quantization (bnb)
-    pip("unsloth", "sentencepiece") # Qwen unsloth loader
+    pip("bitsandbytes>=0.46.1")     # Required for Qwen 4-bit BNB quantization
+    pip("sentencepiece")            # Required for Qwen tokenizer
+    # unsloth installed without deps to prevent torch downgrade
+    pip("unsloth", "--no-deps")     # Qwen unsloth loader (no-deps preserves torch version)
 
     # 2j. System + API + UI
     pip(
