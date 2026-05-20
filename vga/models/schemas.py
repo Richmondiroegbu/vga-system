@@ -155,31 +155,38 @@ class CharacterDescription(BaseModel):
 
     character_id: str
     name: str
-    age_range: str
-    appearance: str
-    emotional_arc: str
+    age_range: str = ""
+    appearance: str = ""
+    emotional_arc: str = ""       # optional — Qwen may omit this field
 
 
 class SceneDescription(BaseModel):
     """Scene-level description from script."""
 
-    scene_id: str
-    scene_number: int
-    title: str
+    scene_id: Optional[str] = None      # Qwen may use scene_number instead
+    scene_number: int = 1
+    title: str = ""                     # optional — Qwen may omit
     description: str
-    emotional_tone: str
+    emotional_tone: str = "hopeful"     # default if Qwen omits
     duration_hint_s: Optional[float] = None
+
+    @model_validator(mode="after")
+    def ensure_scene_id(self) -> "SceneDescription":
+        """Auto-generate scene_id from scene_number if Qwen didn't provide it."""
+        if not self.scene_id:
+            self.scene_id = f"scene_{self.scene_number:03d}"
+        return self
 
 
 class ScriptSchema(BaseModel):
     """Output of ScriptAgent (S-01). schema_version v6.0."""
 
-    job_id: str
-    title: str
-    logline: str
-    characters: List[CharacterDescription]
-    scenes: List[SceneDescription]
-    total_duration_estimate_s: float
+    job_id: str = ""                    # filled in by ScriptAgent if Qwen omits it
+    title: str = "Untitled Story"
+    logline: str = ""
+    characters: List[CharacterDescription] = []
+    scenes: List[SceneDescription] = []
+    total_duration_estimate_s: float = 60.0
     schema_version: str = "v6.0"
 
 
