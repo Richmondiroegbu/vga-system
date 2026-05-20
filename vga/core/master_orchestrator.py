@@ -136,7 +136,15 @@ class MasterOrchestrator:
                     f"stage_start:{stage_id}", stage_id=stage_id, scene_id=scene_id
                 )
 
-            output = agent.run(input_data, context)
+            agent_result = agent.run(input_data, context)
+
+            # Agents return (output, new_context) tuples — unpack properly.
+            # The agent's context evolution is incorporated before orchestrator adds more.
+            if (isinstance(agent_result, tuple) and len(agent_result) == 2
+                    and isinstance(agent_result[1], ImmutableContext)):
+                output, context = agent_result   # use agent's evolved context
+            else:
+                output = agent_result
 
             # === Step 6: Output schema validation (RULE-90) ===
             self._validate_output(stage_id, output)
