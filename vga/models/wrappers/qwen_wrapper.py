@@ -123,6 +123,16 @@ class QwenWrapper:
         if self._model is not None:
             return
         try:
+            import torch
+            # Force CUDA context initialization BEFORE bitsandbytes imports.
+            # Without this, bitsandbytes fails to detect GPU and falls back to CPU.
+            if torch.cuda.is_available():
+                torch.cuda.set_device(0)
+                _warm = torch.zeros(1, device="cuda")
+                torch.cuda.synchronize()
+                del _warm
+                logger.info("QwenWrapper: CUDA context initialized on device 0")
+
             from transformers import (
                 AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
             )
