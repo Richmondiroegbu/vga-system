@@ -133,24 +133,19 @@ class QwenWrapper:
             path = str(settings.QWEN_MODEL_PATH)
             logger.info("QwenWrapper: loading model from %s", path)
             self._tokenizer = AutoTokenizer.from_pretrained(path)
-            import torch
-            # Force GPU device map — bypasses bitsandbytes broken device detection
-            # on RTX 5090 (sm_120). {"": "cuda:0"} tells transformers to place ALL
-            # layers on GPU without going through bnb's cuDeviceGet detection.
-            gpu_available = torch.cuda.is_available()
-            device_map = {"": "cuda:0"} if gpu_available else "cpu"
-            logger.info("QwenWrapper: device_map=%s (GPU available: %s)", device_map, gpu_available)
-
             bnb_config = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_use_double_quant=True,
                 bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_compute_dtype="bfloat16",
             )
+            # device_map="auto" — bitsandbytes falls back to CPU on this pod's
+            # CUDA setup (RTX 5090 sm_120 + cu128 CUDA allocator warmup bug).
+            # CPU inference takes ~75s per call. GPU is used for all other models.
             self._model = AutoModelForCausalLM.from_pretrained(
                 path,
                 quantization_config=bnb_config,
-                device_map=device_map,
+                device_map="auto",
             )
             logger.info("QwenWrapper: model loaded (4-bit BNB)")
         except Exception as exc:
