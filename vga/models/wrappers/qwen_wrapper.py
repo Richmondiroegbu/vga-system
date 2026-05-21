@@ -92,7 +92,7 @@ class QwenWrapper:
         self,
         prompt: str,
         system_prompt: str,
-        max_tokens: int = 4096,
+        max_tokens: int = 1024,  # was 4096 — a 60s script needs ~500 tokens max
     ) -> str:
         """Load model, run inference, unload, return raw text."""
         self._ensure_loaded()
@@ -112,6 +112,7 @@ class QwenWrapper:
                     max_new_tokens=max_tokens,
                     temperature=0.7,
                     do_sample=True,
+                    repetition_penalty=1.1,   # prevents loops which slow CPU inference
                 )
             generated = output_ids[0][inputs["input_ids"].shape[1]:]
             return self._tokenizer.decode(generated, skip_special_tokens=True).strip()
