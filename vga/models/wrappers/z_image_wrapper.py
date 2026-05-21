@@ -78,12 +78,12 @@ class ZImageWrapper:
             import torch
             path = str(settings.ZIMAGE_MODEL_PATH)
             logger.info("ZImageWrapper: loading from %s", path)
+            # Z-Image-Turbo uses bfloat16 — no fp16 variant files in repo
             self._pipe = AutoPipelineForImage2Image.from_pretrained(
                 path,
-                torch_dtype=torch.float16,
-                variant="fp16",
+                torch_dtype=torch.bfloat16,
             )
             self._pipe.enable_model_cpu_offload()
-            logger.info("ZImageWrapper: Z-Image-Turbo loaded")
+            logger.info("ZImageWrapper: Z-Image-Turbo loaded (bfloat16)")
         except Exception as exc:
             raise ModelLoadError(f"ZImageWrapper failed to load: {exc}") from exc
