@@ -120,35 +120,27 @@ class QwenWrapper:
             raise ModelLoadError(f"QwenWrapper inference failed: {exc}") from exc
 
     def _ensure_loaded(self) -> None:
-        """Lazy-load the Qwen model using BitsAndBytesConfig for 4-bit quantization.
-        Note: bitsandbytes may use CPU backend on RTX 5090 due to a driver detection
-        quirk. Qwen inference takes ~75s on CPU, which is acceptable for testing.
-        All other GPU models (FLUX, CLIP, Wan2.2) still run on GPU.
+        """Lazy-load Qwen2.5-14B-Instruct in bfloat16 directly on GPU.
+
+        Uses standard float16 loading — no bitsandbytes required.
+        Model: Qwen/Qwen2.5-14B-Instruct (28 GB bfloat16, fits in RTX 5090 32 GB VRAM).
+        Generation speed: ~50-100 tokens/second on GPU vs ~3-5 on CPU.
         """
         if self._model is not None:
             return
         try:
-            from transformers import (
-                AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-            )
+            import torch
+            from transformers import AutoModelForCausalLM, AutoTokenizer
             path = str(settings.QWEN_MODEL_PATH)
-            logger.info("QwenWrapper: loading model from %s", path)
+            logger.info("QwenWrapper: loading model from %s (bfloat16, GPU)", path)
             self._tokenizer = AutoTokenizer.from_pretrained(path)
-            bnb_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_use_double_quant=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype="bfloat16",
-            )
-            # device_map="auto" — bitsandbytes falls back to CPU on this pod's
-            # CUDA setup (RTX 5090 sm_120 + cu128 CUDA allocator warmup bug).
-            # CPU inference takes ~75s per call. GPU is used for all other models.
             self._model = AutoModelForCausalLM.from_pretrained(
                 path,
-                quantization_config=bnb_config,
-                device_map="auto",
+                torch_dtype=torch.bfloat16,
+                device_map="cuda",   # direct GPU load — no bitsandbytes needed
             )
-            logger.info("QwenWrapper: model loaded (4-bit BNB)")
+            logger.info("QwenWrapper: model loaded on GPU (bfloat16) — device: %s",
+                       next(self._model.parameters()).device)
         except Exception as exc:
             raise ModelLoadError(f"QwenWrapper failed to load: {exc}") from exc
 
