@@ -119,20 +119,14 @@ class QwenWrapper:
             raise ModelLoadError(f"QwenWrapper inference failed: {exc}") from exc
 
     def _ensure_loaded(self) -> None:
-        """Lazy-load the Qwen model using BitsAndBytesConfig for 4-bit quantization."""
+        """Lazy-load the Qwen model using BitsAndBytesConfig for 4-bit quantization.
+        Note: bitsandbytes may use CPU backend on RTX 5090 due to a driver detection
+        quirk. Qwen inference takes ~75s on CPU, which is acceptable for testing.
+        All other GPU models (FLUX, CLIP, Wan2.2) still run on GPU.
+        """
         if self._model is not None:
             return
         try:
-            import torch
-            # Force CUDA context initialization BEFORE bitsandbytes imports.
-            # Without this, bitsandbytes fails to detect GPU and falls back to CPU.
-            if torch.cuda.is_available():
-                torch.cuda.set_device(0)
-                _warm = torch.zeros(1, device="cuda")
-                torch.cuda.synchronize()
-                del _warm
-                logger.info("QwenWrapper: CUDA context initialized on device 0")
-
             from transformers import (
                 AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
             )
