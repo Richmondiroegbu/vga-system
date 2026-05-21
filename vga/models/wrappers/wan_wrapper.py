@@ -66,27 +66,31 @@ class WanWrapper:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        full_prompt = self._build_prompt(prompt, composition_plan)
-        logger.info(
-            "WanWrapper: generating Segment_1 motion_vector=%s camera=%s",
-            composition_plan.motion_vector, composition_plan.camera_motion,
-        )
-
-        try:
-            import torch
-            generator = torch.Generator().manual_seed(seed)
-            output = self._pipe(
-                image=init_image,
-                prompt=full_prompt,
-                num_frames=num_frames,
-                guidance_scale=5.0,
-                num_inference_steps=20,
-                generator=generator,
+        if self._pipe == "ffmpeg_fallback":
+            # Create a still-image video as placeholder for pipeline testing
+            logger.info("WanWrapper: using ffmpeg still-image fallback for Segment_1")
+            self._create_still_video(init_image, output_path, fps=fps, num_frames=num_frames)
+        else:
+            full_prompt = self._build_prompt(prompt, composition_plan)
+            logger.info(
+                "WanWrapper: generating Segment_1 motion_vector=%s camera=%s",
+                composition_plan.motion_vector, composition_plan.camera_motion,
             )
-            frames = output.frames[0]
-            self._save_video(frames, output_path, fps=fps)
-        except Exception as exc:
-            raise ModelLoadError(f"WanWrapper inference failed: {exc}") from exc
+            try:
+                import torch
+                generator = torch.Generator().manual_seed(seed)
+                output = self._pipe(
+                    image=init_image,
+                    prompt=full_prompt,
+                    num_frames=num_frames,
+                    guidance_scale=5.0,
+                    num_inference_steps=20,
+                    generator=generator,
+                )
+                frames = output.frames[0]
+                self._save_video(frames, output_path, fps=fps)
+            except Exception as exc:
+                raise ModelLoadError(f"WanWrapper inference failed: {exc}") from exc
 
         duration_s = num_frames / fps
         return VideoSegmentArtifact(
@@ -99,8 +103,21 @@ class WanWrapper:
         )
 
     def _ensure_loaded(self) -> None:
-        """Lazy-load Wan2.2-I2V pipeline."""
+        """Lazy-load Wan2.2-I2V pipeline.
+
+        The nalexand/Wan2.2-I2V-A14B-FP8 model uses a custom format (no model_index.json).
+        Falls back to ffmpeg-based still-image video when diffusers format is unavailable.
+        """
         if self._pipe is not None:
+            return
+        model_index = Path(settings.WAN22_MODEL_PATH) / "model_index.json"
+        if not model_index.exists():
+            logger.warning(
+                "WanWrapper: no model_index.json at %s — using ffmpeg still-image fallback. "
+                "Install Wan-AI/Wan2.2-I2V-A14B-Diffusers for real video generation.",
+                settings.WAN22_MODEL_PATH,
+            )
+            self._pipe = "ffmpeg_fallback"
             return
         try:
             from diffusers import WanImageToVideoPipeline
@@ -157,3 +174,30 @@ class WanWrapper:
                     writer.release()
             except Exception as exc:
                 logger.error("WanWrapper: failed to save video: %s", exc)
+
+    @staticmethod
+    def _create_still_video(
+        image: "PIL.Image.Image",
+        output_path: Path,
+        fps: int = 15,
+        num_frames: int = 81,
+    ) -> None:
+        """Create a still-image looped video via ffmpeg (fallback for testing)."""
+        import subprocess
+        import tempfile
+        duration = num_frames / fps
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
+            tmp_img = f.name
+        image.save(tmp_img, quality=95)
+        try:
+            subprocess.run([
+                "ffmpeg", "-y", "-loop", "1", "-i", tmp_img,
+                "-c:v", "libx264", "-t", str(duration),
+                "-vf", f"fps={fps},scale=832:480",
+                "-pix_fmt", "yuv420p",
+                str(output_path),
+            ], check=True, capture_output=True)
+            logger.info("WanWrapper: still-image video created at %s", output_path)
+        finally:
+            import os
+            os.unlink(tmp_img)
