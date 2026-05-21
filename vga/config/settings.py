@@ -56,7 +56,7 @@ class VGASettings(BaseSettings):
 
     # === SVI Environment ===
     SVI_REPO_BRANCH: str = "svi_wan22"
-    SVI_WAN22_PYTHON: str = "/opt/conda/envs/svi_wan22/bin/python"
+    SVI_WAN22_PYTHON: str = "/workspace/miniconda3/envs/svi_wan22/bin/python"
     # RTX 5090 is Blackwell sm_120. PyTorch 2.7.1+cu128 is confirmed working
     # for SVI (flash_attn==2.8.0.post2 tested with this combination).
     # PyTorch 2.8.0 also works. Minimum is 2.7.0 (first stable sm_120 release).

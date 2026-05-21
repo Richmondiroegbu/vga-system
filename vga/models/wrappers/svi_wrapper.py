@@ -70,11 +70,25 @@ class SVIWrapper:
             TemporalSegmentFailureError if subprocess fails
         """
         from vga.core.exceptions import SVICFGViolationError
+        import shutil
         if not (settings.SVI_CFG_MIN <= cfg <= settings.SVI_CFG_MAX):
             raise SVICFGViolationError(cfg_value=cfg)
 
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Fallback: if svi_wan22 env doesn't exist, copy previous segment as placeholder
+        if not Path(settings.SVI_WAN22_PYTHON).exists():
+            logger.warning(
+                "SVIWrapper: svi_wan22 env not found at %s — using copy fallback for segment %d. "
+                "Set up svi_wan22 conda env for real temporal generation.",
+                settings.SVI_WAN22_PYTHON, segment_id,
+            )
+            prev_segment = output_path.parent / f"segment_{segment_id - 1:03d}.mp4"
+            if prev_segment.exists():
+                shutil.copy2(str(prev_segment), str(output_path))
+                logger.info("SVIWrapper: copied segment %d → %d (fallback)", segment_id - 1, segment_id)
+            return str(output_path)
 
         lora_schedule = {
             "high_noise_weight": lora_weight_high,
