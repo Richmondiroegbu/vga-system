@@ -263,31 +263,19 @@ def run_pipeline(job_id: str, request: dict) -> None:
     logger.info(f"Segment_1 generated: {seg1_output['segment_1'].file_path}")
 
     # S-09: Temporal Engine (SVI autoregressive)
-    # Skip SVI if svi_wan22 conda env is not set up — use only segment_1 for testing
-    from pathlib import Path as _Path
-    from vga.config.settings import settings as _settings
-    _svi_python = _settings.SVI_WAN22_PYTHON
-    _svi_available = _Path(_svi_python).exists()
-    if not _svi_available:
-        logger.warning(
-            "S-09: svi_wan22 env not found at %s — skipping SVI, using segment_1 only. "
-            "Pipeline continues to audio stages for testing.", _svi_python,
+    logger.info("S-09: Generating remaining segments with SVI temporal engine...")
+    update_job_status(job_id, "running", "S-09 TemporalEngine", 70.0)
+    from vga.temporal.temporal_engine import TemporalEngine
+    te = registry.get("temporal_engine")
+    remaining_plans = scene_plans[0].segments[1:] if len(scene_plans[0].segments) > 1 else []
+    if remaining_plans:
+        segments, ctx = te.generate_segments(
+            seg1_output["segment_1"], remaining_plans, ctx, output_dir
         )
-        all_segments = [seg1_output["segment_1"]]
+        all_segments = [seg1_output["segment_1"]] + segments
     else:
-        logger.info("S-09: Generating remaining segments with SVI temporal engine...")
-        update_job_status(job_id, "running", "S-09 TemporalEngine", 70.0)
-        from vga.temporal.temporal_engine import TemporalEngine
-        te = registry.get("temporal_engine")
-        remaining_plans = scene_plans[0].segments[1:] if len(scene_plans[0].segments) > 1 else []
-        if remaining_plans:
-            segments, ctx = te.generate_segments(
-                seg1_output["segment_1"], remaining_plans, ctx, output_dir
-            )
-            all_segments = [seg1_output["segment_1"]] + segments
-        else:
-            all_segments = [seg1_output["segment_1"]]
-    logger.info(f"S-09: {len(all_segments)} segment(s) ready for audio pipeline")
+        all_segments = [seg1_output["segment_1"]]
+    logger.info(f"Generated {len(all_segments)} total segments")
 
     if not wait_for_hrg("HRG-8", {"segments": len(all_segments)}, job_id):
         return
