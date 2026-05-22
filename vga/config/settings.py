@@ -79,8 +79,8 @@ class VGASettings(BaseSettings):
     SVI_CFG_MIN: float = 5.0
     SVI_CFG_MAX: float = 6.0
     SVI_CFG_DEFAULT: float = 5.5
-    STEPS_CRITICAL: int = 50     # 30–50 for critical segments
-    STEPS_STANDARD: int = 30     # minimum quality floor
+    STEPS_CRITICAL: int = 50     # production quality (increase when ready)
+    STEPS_STANDARD: int = 12    # DEV: 12 for fast testing; raise to 30+ for production
 
     # === SVI LoRA Scheduling (FR-932–FR-934) ===
     LORA_WEIGHT_HIGH_NOISE: float = 0.6          # t > HIGH_NOISE_FRACTION * T
