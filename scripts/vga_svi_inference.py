@@ -44,8 +44,12 @@ def extract_last_frame(video_path: str, output_image_path: str) -> bool:
         return False
 
 
-def load_fp8_state_dict(fp8_dir: str, cast_to=torch.bfloat16) -> dict:
+def load_fp8_state_dict(fp8_dir: str) -> dict:
     """Load Wan2.2 FP8 split-block model, reconstructing proper key prefixes.
+
+    Keeps tensors in their native FP8 dtype (float8_e4m3fn) to minimize RAM.
+    Two 14GB FP8 DiTs = 28GB total, well within the 43GB cgroup limit.
+    VRAM management casts FP8→BF16 during computation (per-block, on-demand).
 
     FP8 files layout:
       blocks.N.safetensors  (N=0..39): block tensors WITHOUT block prefix
@@ -66,15 +70,12 @@ def load_fp8_state_dict(fp8_dir: str, cast_to=torch.bfloat16) -> dict:
     state_dict = {}
     fp8_dir = Path(fp8_dir)
 
-    print(f"  Loading 40 FP8 transformer blocks...")
+    print(f"  Loading 40 FP8 transformer blocks (keeping FP8 dtype)...")
     for n in range(40):
         block_file = fp8_dir / f"blocks.{n}.safetensors"
         with safe_open(str(block_file), framework="pt", device="cpu") as f:
             for key in f.keys():
-                tensor = f.get_tensor(key)
-                if cast_to is not None and tensor.dtype != cast_to:
-                    tensor = tensor.to(cast_to)
-                state_dict[f"blocks.{n}.{key}"] = tensor
+                state_dict[f"blocks.{n}.{key}"] = f.get_tensor(key)
 
     print(f"  Loading component files...")
     for fname, prefix in [
@@ -86,20 +87,22 @@ def load_fp8_state_dict(fp8_dir: str, cast_to=torch.bfloat16) -> dict:
     ]:
         with safe_open(str(fp8_dir / fname), framework="pt", device="cpu") as f:
             for key in f.keys():
-                tensor = f.get_tensor(key)
-                if cast_to is not None and tensor.dtype != cast_to:
-                    tensor = tensor.to(cast_to)
-                state_dict[f"{prefix}{key}"] = tensor
+                state_dict[f"{prefix}{key}"] = f.get_tensor(key)
 
     return state_dict
 
 
 def apply_vram_management(model: torch.nn.Module, device: str = "cuda") -> None:
-    """Apply DiffSynth block-wise CPU offloading to a WanModel.
+    """Apply DiffSynth block-wise VRAM management to a WanModel with FP8 weights.
 
-    Wraps DiTBlock layers in AutoWrappedNonRecurseModule and other layers
-    in AutoWrappedModule/AutoWrappedLinear so that blocks move GPU↔CPU one
-    at a time during the forward pass, keeping total VRAM within 32GB.
+    DiTs are kept in FP8 on CPU (14GB each). Each DiTBlock is wrapped in
+    AutoWrappedNonRecurseModule which, during forward(), casts the block from
+    FP8 CPU → BF16 CUDA for computation, then the copy is freed. This keeps
+    VRAM usage to ~700MB per active block vs 28GB for the full BF16 model.
+
+    Memory budget (43GB cgroup limit):
+      - Two FP8 DiTs on CPU: 14 + 14 = 28GB
+      - Peak VRAM per timestep: 1 block × 700MB BF16 ≈ 700MB
     """
     from diffsynth.core.vram.layers import (
         enable_vram_management,
@@ -109,21 +112,23 @@ def apply_vram_management(model: torch.nn.Module, device: str = "cuda") -> None:
     from diffsynth.models.wan_video_dit import DiTBlock, Head, MLP, RMSNorm
     import torch.nn as nn
 
-    # Try to import AutoWrappedLinear (may not exist in all versions)
     try:
         from diffsynth.core.vram.layers import AutoWrappedLinear
     except ImportError:
         AutoWrappedLinear = AutoWrappedModule
 
+    # Keep FP8 model on CPU for offload and onload.
+    # computation_device="cuda" and computation_dtype=bfloat16 forces cast_to()
+    # in AutoWrappedModule.computation(), which deep-copies each block to CUDA BF16.
     vram_config = {
-        "offload_dtype": torch.bfloat16,
+        "offload_dtype": torch.float8_e4m3fn,
         "offload_device": "cpu",
-        "onload_dtype": torch.bfloat16,
-        "onload_device": device,
-        "preparing_dtype": torch.bfloat16,
-        "preparing_device": device,
+        "onload_dtype": torch.float8_e4m3fn,
+        "onload_device": "cpu",          # Stay on CPU — cast_to handles GPU transfer
+        "preparing_dtype": torch.float8_e4m3fn,
+        "preparing_device": "cpu",
         "computation_dtype": torch.bfloat16,
-        "computation_device": device,
+        "computation_device": device,    # GPU: cast_to creates BF16 copy here
     }
     module_map = {
         DiTBlock: AutoWrappedNonRecurseModule,
@@ -163,16 +168,17 @@ def load_wan_dit_fp8(fp8_dir: str, device: str = "cuda") -> "WanModel":
     with skip_model_initialization():
         model = WanModel(**config)
 
-    print(f"  Loading FP8 state dict from {fp8_dir}...")
-    state_dict = load_fp8_state_dict(fp8_dir, cast_to=torch.bfloat16)
+    print(f"  Loading FP8 state dict from {fp8_dir} (native FP8 dtype, no cast)...")
+    state_dict = load_fp8_state_dict(fp8_dir)
 
     missing, unexpected = model.load_state_dict(state_dict, strict=False, assign=True)
     if missing:
         print(f"  WARNING: {len(missing)} missing keys (first 5): {missing[:5]}")
     if unexpected:
         print(f"  WARNING: {len(unexpected)} unexpected keys (first 5): {unexpected[:5]}")
+    del state_dict  # explicitly release dict (model now owns the tensors)
 
-    print(f"  Applying block-wise VRAM management...")
+    print(f"  Applying block-wise VRAM management (FP8→BF16 on-demand)...")
     apply_vram_management(model, device=device)
 
     model = model.eval()
