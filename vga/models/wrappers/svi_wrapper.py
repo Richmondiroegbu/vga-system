@@ -34,7 +34,7 @@ class SVIWrapper:
 
     def generate_segment(
         self,
-        init_latents_path: str | Path,
+        init_latents_path: str | Path,   # kept for API compatibility; actual prev segment path used
         prompt: str,
         cfg: float,
         steps: int,
@@ -97,11 +97,18 @@ class SVIWrapper:
         }
 
         # Write inference config to a temp JSON so subprocess can read it
+        # SVI takes a reference image (last frame of previous segment), not latents.
+        # The init_latents_path parameter contains the previous segment video path.
+        prev_segment_path = output_path.parent / f"segment_{segment_id - 1:03d}.mp4"
+        if not prev_segment_path.exists():
+            # Fallback: use init_latents_path if it's actually a video
+            prev_segment_path = Path(str(init_latents_path))
+
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".json", delete=False, encoding="utf-8"
         ) as f:
             config = {
-                "init_latents_path": str(init_latents_path),
+                "prev_segment_path": str(prev_segment_path),
                 "prompt": prompt,
                 "cfg": cfg,
                 "steps": steps,
@@ -121,9 +128,15 @@ class SVIWrapper:
             scene_id, segment_id, cfg, steps,
         )
 
+        # Bridge script lives in /workspace/vga/scripts/ (part of our repo)
+        bridge_script = Path("/workspace/vga/scripts/vga_svi_inference.py")
+        if not bridge_script.exists():
+            # Fallback to SVI repo location
+            bridge_script = settings.SVI_REPO_PATH / "vga_svi_inference.py"
+
         cmd = [
             settings.SVI_WAN22_PYTHON,
-            str(settings.SVI_REPO_PATH / "vga_svi_inference.py"),
+            str(bridge_script),
             "--config", config_path,
         ]
 
