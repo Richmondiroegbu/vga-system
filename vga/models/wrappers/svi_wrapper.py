@@ -141,13 +141,19 @@ class SVIWrapper:
         ]
 
         try:
+            # Timeout: 1800s (30 min) — Wan2.2 model loads cold in ~3-5 min,
+            # then inference at 12 dev-steps takes ~2-3 min. Total ~8 min worst case.
+            # Set capture_output=False so SVI logs are visible for debugging.
             result = subprocess.run(
                 cmd,
-                capture_output=True,
-                text=True,
-                timeout=600,   # 10 minute max per segment
+                capture_output=False,  # show SVI output in terminal for visibility
+                timeout=1800,
             )
         except subprocess.TimeoutExpired:
+            logger.error(
+                "SVIWrapper: segment %d timed out after 1800s — Wan2.2 model load too slow?",
+                segment_id,
+            )
             raise TemporalSegmentFailureError(
                 scene_id=scene_id,
                 segment_id=segment_id,
