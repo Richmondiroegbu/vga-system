@@ -107,6 +107,11 @@ HF_TOKEN            = os.environ.get("HUGGING_FACE_HUB_TOKEN", "")
 if HF_TOKEN:
     os.environ["HUGGING_FACE_HUB_TOKEN"] = HF_TOKEN
     os.environ["HUGGING_FACE_HUB_TOKEN_PATH"] = ""   # prevent file-based override
+
+# Ubuntu 24.04 uses PEP 668 "externally managed" Python. Setting this env var
+# globally lets all `pip install` subprocess calls proceed without a venv.
+# Safe on RunPod pods where pip and site-packages are managed by the image, not apt.
+os.environ.setdefault("PIP_BREAK_SYSTEM_PACKAGES", "1")
 LORA_IDENTITY_REPO  = os.environ.get("LORA_IDENTITY_REPO",  "")
 LORA_STYLE_REPO     = os.environ.get("LORA_STYLE_REPO",     "")
 SVI_LORA_REPO       = os.environ.get("SVI_LORA_REPO",       "vita-video-gen/svi-model")
@@ -192,11 +197,26 @@ def system_setup() -> None:
 
     # 1-pre. Bootstrap prerequisites — must exist before Phase 1 uses them.
     # psutil is used in _check_disk_space() (Phase 1) before Phase 2 installs deps.
-    subprocess.run(
-        [sys.executable, "-m", "pip", "install", "psutil", "--quiet"],
-        check=True,
-    )
-    log.info("[phase1] Bootstrap prerequisites (psutil) installed.")
+    # Ubuntu 24.04 uses PEP 668 "externally managed" environments; pip exits 1 even
+    # when the package is already installed. Try plain install first; if it fails
+    # (exit code != 0 but package importable) or needs --break-system-packages, handle it.
+    try:
+        import psutil  # noqa: F401 — already available (e.g. RunPod base image)
+        log.info("[phase1] Bootstrap prerequisites (psutil) already available.")
+    except ImportError:
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "psutil", "--quiet",
+             "--break-system-packages"],
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            # Last resort: try without the flag (older pip / venv)
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "psutil", "--quiet"],
+                check=True,
+            )
+        import psutil  # noqa: F401
+        log.info("[phase1] Bootstrap prerequisites (psutil) installed.")
 
     # 1a. apt packages
     log.info("[phase1] Installing system packages …")
