@@ -278,7 +278,20 @@ def build_pipeline(lora_path_high: str, lora_path_low: str, device: str = "cuda"
 
     pipe = WanVideoSviPipeline(device=device, torch_dtype=torch.bfloat16)
 
-    # === Load high-noise and low-noise DiTs (FP8, GPU-resident by default) ===
+    # === Load T5 text encoder and VAE FIRST (DiffSynth loads them to GPU initially,
+    #     then offloads to CPU per offload_device="cpu"). Must happen BEFORE the
+    #     GPU-resident DiTs are placed in VRAM or there is no room left.
+    #     GPU budget: T5 loads (~10GB BF16) → offloads to CPU → VAE (~1GB) → offloads.
+    #     After both offload: ~0GB GPU used, ready for the two 14GB FP8 DiTs (28GB). ===
+    print("Loading T5 text encoder and VAE (offloads to CPU)...")
+    t5_config = ModelConfig(path=f"{WAN22_DIR}/models_t5_umt5-xxl-enc-bf16.pth", offload_device="cpu")
+    vae_config = ModelConfig(path=f"{WAN22_DIR}/Wan2.1_VAE.pth", offload_device="cpu")
+    model_pool = pipe.download_and_load_models([t5_config, vae_config])
+    pipe.text_encoder = model_pool.fetch_model("wan_video_text_encoder")
+    pipe.vae = model_pool.fetch_model("wan_video_vae")
+
+    # === Load high-noise and low-noise DiTs AFTER T5/VAE have offloaded to CPU ===
+    # GPU is now free for the two FP8 DiTs (28GB total on RTX 5090 32GB).
     print(f"Loading high-noise DiT (FP8, gpu_resident={gpu_resident})...")
     pipe.dit = load_wan_dit_fp8(
         f"{WAN22_DIR}/high_noise_model_fp8", device=device, gpu_resident=gpu_resident
@@ -288,14 +301,6 @@ def build_pipeline(lora_path_high: str, lora_path_low: str, device: str = "cuda"
     pipe.dit2 = load_wan_dit_fp8(
         f"{WAN22_DIR}/low_noise_model_fp8", device=device, gpu_resident=gpu_resident
     )
-
-    # === Load T5 text encoder and VAE via standard DiffSynth (single files) ===
-    print("Loading T5 text encoder and VAE...")
-    t5_config = ModelConfig(path=f"{WAN22_DIR}/models_t5_umt5-xxl-enc-bf16.pth", offload_device="cpu")
-    vae_config = ModelConfig(path=f"{WAN22_DIR}/Wan2.1_VAE.pth", offload_device="cpu")
-    model_pool = pipe.download_and_load_models([t5_config, vae_config])
-    pipe.text_encoder = model_pool.fetch_model("wan_video_text_encoder")
-    pipe.vae = model_pool.fetch_model("wan_video_vae")
 
     # === Load tokenizer from local path ===
     print("Loading tokenizer...")
