@@ -39,14 +39,16 @@ def verify_and_configure_attention() -> bool:
 
     Returns True if flash_attn package is importable.
     """
-    # Force PyTorch SDPA to use Flash Attention backend when available.
-    # This ensures DiffSynth's attention layers use FA2 even if they call
-    # F.scaled_dot_product_attention rather than flash_attn directly.
+    # Configure PyTorch SDPA backends. Flash Attention is fastest but requires
+    # head_dim <= 256. The VAE uses head_dim=384, so it falls back to
+    # mem_efficient_sdp. Leave all backends enabled; PyTorch picks the best
+    # available kernel per operation. Disabling math_sdp prevents the slow
+    # non-fused fallback on large sequences.
     if hasattr(torch.backends.cuda, "enable_flash_sdp"):
-        torch.backends.cuda.enable_flash_sdp(True)
-        torch.backends.cuda.enable_mem_efficient_sdp(False)  # flash_sdp supersedes this
-        torch.backends.cuda.enable_math_sdp(False)           # never use slow fallback
-        print("  PyTorch SDPA: Flash backend ENABLED, math backend disabled")
+        torch.backends.cuda.enable_flash_sdp(True)           # DiT attention (head_dim ≤ 256)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)   # VAE attention (head_dim=384)
+        torch.backends.cuda.enable_math_sdp(False)           # disable slow O(n²) fallback
+        print("  PyTorch SDPA: Flash+MemEfficient ENABLED, math (slow) disabled")
     else:
         print("  PyTorch SDPA: enable_flash_sdp not available (PyTorch too old?)")
 
