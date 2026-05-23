@@ -402,11 +402,18 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
 
         print(f"Running SVI inference: cfg={cfg:.2f} steps={steps} → {output_path.name}")
         if tea_cache_thresh > 0.0:
+            # Wan2.2-I2V-A14B shares the Wan2.1-I2V-14B-480P architecture.
+            # TeaCache uses this profile for its rel_l1 thresholds.
+            tea_model_id = "Wan2.1-I2V-14B-480P"
             try:
-                video_frames = pipe(tea_cache_l1_thresh=tea_cache_thresh, **call_kwargs)
-                print(f"  TeaCache enabled (thresh={tea_cache_thresh}) — ~2-3x attention speedup")
-            except TypeError:
-                # Pipeline version doesn't support tea_cache_l1_thresh yet
+                video_frames = pipe(
+                    tea_cache_l1_thresh=tea_cache_thresh,
+                    tea_cache_model_id=tea_model_id,
+                    **call_kwargs,
+                )
+                print(f"  TeaCache enabled (thresh={tea_cache_thresh}, id={tea_model_id}) — ~2-3x speedup")
+            except (TypeError, ValueError):
+                # Pipeline version doesn't support TeaCache or model_id not recognised
                 print("  TeaCache: not supported by this pipeline build, running standard inference")
                 video_frames = pipe(**call_kwargs)
         else:
