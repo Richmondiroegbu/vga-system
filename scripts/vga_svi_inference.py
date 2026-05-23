@@ -290,6 +290,16 @@ def build_pipeline(lora_path_high: str, lora_path_low: str, device: str = "cuda"
     pipe.text_encoder = model_pool.fetch_model("wan_video_text_encoder")
     pipe.vae = model_pool.fetch_model("wan_video_vae")
 
+    # Force PyTorch to return the CUDA allocator pool back to the GPU after T5/VAE
+    # offload. Without this, PyTorch's caching allocator holds onto the ~10GB T5
+    # VRAM even though the tensors are on CPU — leaving no room for the two 14GB DiTs.
+    if gpu_resident:
+        import gc as _gc
+        _gc.collect()
+        torch.cuda.empty_cache()
+        free_gb = (torch.cuda.mem_get_info()[0]) / 1e9
+        print(f"  VRAM after T5/VAE offload + cache clear: {free_gb:.1f}GB free")
+
     # === Load high-noise and low-noise DiTs AFTER T5/VAE have offloaded to CPU ===
     # GPU is now free for the two FP8 DiTs (28GB total on RTX 5090 32GB).
     print(f"Loading high-noise DiT (FP8, gpu_resident={gpu_resident})...")
