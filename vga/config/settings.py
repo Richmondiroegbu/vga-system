@@ -63,6 +63,18 @@ class VGASettings(BaseSettings):
     SVI_WAN22_TORCH_VERSION: str = "2.7.1"
     SVI_WAN22_CUDA_INDEX: str = "cu128"
 
+    # === SVI Persistent Server (speed optimisation) ===
+    # SVIWrapper starts vga_svi_server.py as a background daemon on first segment
+    # call. All subsequent segments POST to the warm server instead of spawning a
+    # fresh subprocess (saves 3-5 min cold load per segment).
+    SVI_SERVER_PORT: int = 8765
+
+    # GPU-resident DiT mode: keeps both FP8 DiTs (28GB) on GPU VRAM instead of
+    # offloading each block to CPU between timesteps. Eliminates ~960 PCIe
+    # round-trips per segment at 12 steps (40 blocks × 2 DiTs × 12 steps).
+    # Disable (set env SVI_GPU_RESIDENT=0) if VRAM OOM occurs on pods < 30GB.
+    SVI_GPU_RESIDENT_DITS: bool = True
+
     # === Identity Thresholds ===
     CLIP_IDENTITY_THRESHOLD: float = 0.93        # RULE-92: minimum CLIP score everywhere
     CLIP_DRIFT_THRESHOLD: float = 0.02           # RULE-93: max drift in image refinement

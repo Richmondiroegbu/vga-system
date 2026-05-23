@@ -5,7 +5,16 @@ Called by SVIWrapper via subprocess with a JSON config file.
 
 Direct FP8 model loading: loads Wan2.2-I2V-A14B FP8 split-block format
 by reconstructing proper key prefixes, bypassing ModelScope/HuggingFace downloads.
-Block-wise VRAM management enables both 28GB BF16 DiTs to run on 32GB VRAM.
+
+GPU-resident DiT mode (SVI_GPU_RESIDENT=1, default ON):
+  Both FP8 DiTs (14GB each = 28GB total) stay in GPU VRAM the entire inference.
+  FP8→BF16 casts happen on-GPU with no PCIe transfers per block, eliminating
+  the ~960 PCIe round-trips that were the primary inference bottleneck.
+  RTX 5090 (32GB) fits both DiTs (28GB) + activations (~2GB).
+
+CPU-offload mode (SVI_GPU_RESIDENT=0):
+  Legacy mode: each DiTBlock is moved CPU→GPU per timestep (safe but slow).
+  Use this if VRAM OOM occurs in GPU-resident mode.
 """
 from __future__ import annotations
 
@@ -23,6 +32,40 @@ if SVI_REPO not in sys.path:
     sys.path.insert(0, SVI_REPO)
 
 WAN22_DIR = "/workspace/models/wan22"
+
+
+def verify_and_configure_attention() -> bool:
+    """Verify FlashAttention-2 availability and configure PyTorch SDPA backend.
+
+    Returns True if flash_attn package is importable.
+    """
+    # Force PyTorch SDPA to use Flash Attention backend when available.
+    # This ensures DiffSynth's attention layers use FA2 even if they call
+    # F.scaled_dot_product_attention rather than flash_attn directly.
+    if hasattr(torch.backends.cuda, "enable_flash_sdp"):
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_mem_efficient_sdp(False)  # flash_sdp supersedes this
+        torch.backends.cuda.enable_math_sdp(False)           # never use slow fallback
+        print("  PyTorch SDPA: Flash backend ENABLED, math backend disabled")
+    else:
+        print("  PyTorch SDPA: enable_flash_sdp not available (PyTorch too old?)")
+
+    try:
+        import flash_attn
+        fa_version = getattr(flash_attn, "__version__", "unknown")
+        print(f"  FlashAttention-2: INSTALLED (version={fa_version})")
+        if torch.cuda.is_available():
+            major, minor = torch.cuda.get_device_capability()
+            gpu_name = torch.cuda.get_device_name(0)
+            print(f"  GPU: {gpu_name} — compute capability {major}.{minor}")
+            if (major, minor) >= (8, 0):
+                print(f"  FlashAttention-2: GPU supports FA2 (sm_{major}{minor} >= sm_80) ✓")
+            else:
+                print(f"  FlashAttention-2: WARNING — sm_{major}{minor} < sm_80, FA2 may not work")
+        return True
+    except ImportError:
+        print("  FlashAttention-2: NOT INSTALLED — using PyTorch SDPA (still fast on RTX 5090)")
+        return False
 
 
 def extract_last_frame(video_path: str, output_image_path: str) -> bool:
@@ -92,17 +135,21 @@ def load_fp8_state_dict(fp8_dir: str) -> dict:
     return state_dict
 
 
-def apply_vram_management(model: torch.nn.Module, device: str = "cuda") -> None:
+def apply_vram_management(
+    model: torch.nn.Module,
+    device: str = "cuda",
+    gpu_resident: bool = True,
+) -> None:
     """Apply DiffSynth block-wise VRAM management to a WanModel with FP8 weights.
 
-    DiTs are kept in FP8 on CPU (14GB each). Each DiTBlock is wrapped in
-    AutoWrappedNonRecurseModule which, during forward(), casts the block from
-    FP8 CPU → BF16 CUDA for computation, then the copy is freed. This keeps
-    VRAM usage to ~700MB per active block vs 28GB for the full BF16 model.
+    gpu_resident=True (default, RTX 5090 recommended):
+      Both FP8 DiTs stay on GPU. No PCIe transfers during inference.
+      FP8→BF16 cast happens on-GPU per block (fast). Requires 28GB+ VRAM.
+      Eliminates 960 PCIe round-trips at 12 steps (40 blocks × 2 DiTs × 12 steps).
 
-    Memory budget (43GB cgroup limit):
-      - Two FP8 DiTs on CPU: 14 + 14 = 28GB
-      - Peak VRAM per timestep: 1 block × 700MB BF16 ≈ 700MB
+    gpu_resident=False (CPU-offload fallback):
+      Each DiTBlock migrates CPU→GPU→CPU per timestep via PCIe (~960 transfers).
+      Safe for constrained VRAM; use if VRAM OOM occurs with gpu_resident=True.
     """
     from diffsynth.core.vram.layers import (
         enable_vram_management,
@@ -117,19 +164,36 @@ def apply_vram_management(model: torch.nn.Module, device: str = "cuda") -> None:
     except ImportError:
         AutoWrappedLinear = AutoWrappedModule
 
-    # Keep FP8 model on CPU for offload and onload.
-    # computation_device="cuda" and computation_dtype=bfloat16 forces cast_to()
-    # in AutoWrappedModule.computation(), which deep-copies each block to CUDA BF16.
-    vram_config = {
-        "offload_dtype": torch.float8_e4m3fn,
-        "offload_device": "cpu",
-        "onload_dtype": torch.float8_e4m3fn,
-        "onload_device": "cpu",          # Stay on CPU — cast_to handles GPU transfer
-        "preparing_dtype": torch.float8_e4m3fn,
-        "preparing_device": "cpu",
-        "computation_dtype": torch.bfloat16,
-        "computation_device": device,    # GPU: cast_to creates BF16 copy here
-    }
+    if gpu_resident:
+        # GPU-resident: blocks stay on GPU in FP8 between timesteps.
+        # computation_device=device triggers GPU-side FP8→BF16 cast (no PCIe).
+        # After forward: BF16 copy freed, block stays on GPU as FP8.
+        vram_config = {
+            "offload_dtype": torch.float8_e4m3fn,
+            "offload_device": device,       # stay on GPU between uses
+            "onload_dtype": torch.float8_e4m3fn,
+            "onload_device": device,        # already on GPU, no-op
+            "preparing_dtype": torch.float8_e4m3fn,
+            "preparing_device": device,     # GPU prepare — no-op
+            "computation_dtype": torch.bfloat16,
+            "computation_device": device,   # GPU BF16 cast, no PCIe transfer
+        }
+        print(f"  VRAM mode: GPU-resident FP8 (no PCIe per block, {device})")
+    else:
+        # CPU-offload: safe for VRAM-constrained environments, slower.
+        # Each block: CPU FP8 → GPU BF16 → compute → GPU freed → back on CPU.
+        vram_config = {
+            "offload_dtype": torch.float8_e4m3fn,
+            "offload_device": "cpu",
+            "onload_dtype": torch.float8_e4m3fn,
+            "onload_device": "cpu",
+            "preparing_dtype": torch.float8_e4m3fn,
+            "preparing_device": "cpu",
+            "computation_dtype": torch.bfloat16,
+            "computation_device": device,
+        }
+        print(f"  VRAM mode: CPU-offload FP8 (960 PCIe round-trips at 12 steps)")
+
     module_map = {
         DiTBlock: AutoWrappedNonRecurseModule,
         Head: AutoWrappedModule,
@@ -144,7 +208,11 @@ def apply_vram_management(model: torch.nn.Module, device: str = "cuda") -> None:
     model.vram_management_enabled = True
 
 
-def load_wan_dit_fp8(fp8_dir: str, device: str = "cuda") -> "WanModel":
+def load_wan_dit_fp8(
+    fp8_dir: str,
+    device: str = "cuda",
+    gpu_resident: bool = True,
+) -> "WanModel":
     """Load Wan2.2-I2V-A14B DiT model from FP8 split-block format with VRAM management."""
     from diffsynth.models.wan_video_dit import WanModel
     from diffsynth.core.vram.initialization import skip_model_initialization
@@ -178,27 +246,48 @@ def load_wan_dit_fp8(fp8_dir: str, device: str = "cuda") -> "WanModel":
         print(f"  WARNING: {len(unexpected)} unexpected keys (first 5): {unexpected[:5]}")
     del state_dict  # explicitly release dict (model now owns the tensors)
 
-    print(f"  Applying block-wise VRAM management (FP8→BF16 on-demand)...")
-    apply_vram_management(model, device=device)
+    mode_label = "GPU-resident FP8" if gpu_resident else "CPU-offload FP8→BF16"
+    print(f"  Applying VRAM management ({mode_label})...")
+    apply_vram_management(model, device=device, gpu_resident=gpu_resident)
+
+    if gpu_resident:
+        # One-time 14GB PCIe transfer: move FP8 weights to GPU now.
+        # After this, all 40 blocks live on GPU — no further PCIe during inference.
+        vram_gb = sum(p.numel() * p.element_size() for p in model.parameters()) / 1e9
+        print(f"  Moving FP8 DiT to {device} (one-time {vram_gb:.1f}GB transfer)...")
+        model = model.to(device)
 
     model = model.eval()
     return model
 
 
 def build_pipeline(lora_path_high: str, lora_path_low: str, device: str = "cuda") -> "WanVideoSviPipeline":
-    """Build WanVideoSviPipeline with local FP8 DiTs + BF16 T5/VAE."""
+    """Build WanVideoSviPipeline with local FP8 DiTs + BF16 T5/VAE.
+
+    SVI_GPU_RESIDENT env var (default=1):
+      1 → both FP8 DiTs stay on GPU (fast, requires 32GB VRAM)
+      0 → CPU-offload per block (safe, slow — legacy behaviour)
+    """
     from diffsynth.pipelines.wan_video_svi import WanVideoSviPipeline
     from diffsynth.core.loader.config import ModelConfig
     from diffsynth.models.wan_video_text_encoder import HuggingfaceTokenizer
 
+    # GPU-resident mode: keeps FP8 DiTs on GPU to avoid PCIe round-trips per block.
+    # Disable with SVI_GPU_RESIDENT=0 if VRAM OOM occurs (e.g. pod has <30GB VRAM).
+    gpu_resident = os.environ.get("SVI_GPU_RESIDENT", "1") != "0"
+
     pipe = WanVideoSviPipeline(device=device, torch_dtype=torch.bfloat16)
 
-    # === Load high-noise and low-noise DiTs (FP8 → BF16 with VRAM management) ===
-    print("Loading high-noise DiT (FP8)...")
-    pipe.dit = load_wan_dit_fp8(f"{WAN22_DIR}/high_noise_model_fp8", device=device)
+    # === Load high-noise and low-noise DiTs (FP8, GPU-resident by default) ===
+    print(f"Loading high-noise DiT (FP8, gpu_resident={gpu_resident})...")
+    pipe.dit = load_wan_dit_fp8(
+        f"{WAN22_DIR}/high_noise_model_fp8", device=device, gpu_resident=gpu_resident
+    )
 
-    print("Loading low-noise DiT (FP8)...")
-    pipe.dit2 = load_wan_dit_fp8(f"{WAN22_DIR}/low_noise_model_fp8", device=device)
+    print(f"Loading low-noise DiT (FP8, gpu_resident={gpu_resident})...")
+    pipe.dit2 = load_wan_dit_fp8(
+        f"{WAN22_DIR}/low_noise_model_fp8", device=device, gpu_resident=gpu_resident
+    )
 
     # === Load T5 text encoder and VAE via standard DiffSynth (single files) ===
     print("Loading T5 text encoder and VAE...")
@@ -234,31 +323,29 @@ def build_pipeline(lora_path_high: str, lora_path_low: str, device: str = "cuda"
     return pipe
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="VGA SVI Inference Bridge")
-    parser.add_argument("--config", required=True, help="Path to JSON config file")
-    args = parser.parse_args()
+def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
+    """Execute one SVI inference request against an already-loaded pipeline.
 
-    config_path = Path(args.config)
-    if not config_path.exists():
-        print(f"ERROR: Config not found: {config_path}")
-        return 1
+    Called both by main() (standalone subprocess mode) and by vga_svi_server.py
+    (persistent server mode). Keeping inference logic here avoids duplication.
 
-    config = json.loads(config_path.read_text(encoding="utf-8"))
+    Returns {"status": "ok", "output_path": str} or {"status": "error", "error": str}.
+    """
+    from PIL import Image
 
     output_path = Path(config["output_path"])
     prev_segment_path = config.get("prev_segment_path", "")
     prompt = config.get("prompt", "cinematic scene, photorealistic")
-    lora_path_high = config["lora_path_high"]
-    lora_path_low = config["lora_path_low"]
     cfg = float(config.get("cfg", 5.5))
     steps = int(config.get("steps", 12))
     camera_motion = config.get("camera_motion", "static")
     motion_vector = config.get("motion_vector", "stationary")
+    # TeaCache: DiffSynth attention caching for 2-3x speedup. Threshold 0.1 is safe;
+    # higher values skip more (faster but may reduce quality). 0.0 disables.
+    tea_cache_thresh = float(config.get("tea_cache_l1_thresh", 0.1))
 
     if not prev_segment_path or not Path(prev_segment_path).exists():
-        print(f"ERROR: Previous segment not found: {prev_segment_path}")
-        return 1
+        return {"status": "error", "error": f"Previous segment not found: {prev_segment_path}"}
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -268,13 +355,9 @@ def main() -> int:
             ref_image_path = f.name
         print(f"Extracting last frame from {Path(prev_segment_path).name}...")
         if not extract_last_frame(prev_segment_path, ref_image_path):
-            return 1
+            return {"status": "error", "error": "Failed to extract reference frame"}
 
-        from PIL import Image
         ref_image = Image.open(ref_image_path).convert("RGB").resize((832, 480))
-
-        print("Building SVI pipeline...")
-        pipe = build_pipeline(lora_path_high, lora_path_low)
 
         full_prompt = (
             f"{prompt}, {camera_motion}, motion: {motion_vector}, "
@@ -287,8 +370,7 @@ def main() -> int:
             "杂乱的背景，三条腿，背景人很多，倒着走"
         )
 
-        print(f"Running SVI inference: cfg={cfg:.2f} steps={steps} → {output_path.name}")
-        video_frames = pipe(
+        call_kwargs: dict = dict(
             prompt=full_prompt,
             negative_prompt=negative_prompt,
             input_image=ref_image,
@@ -301,16 +383,28 @@ def main() -> int:
             seed=42,
         )
 
+        print(f"Running SVI inference: cfg={cfg:.2f} steps={steps} → {output_path.name}")
+        if tea_cache_thresh > 0.0:
+            try:
+                video_frames = pipe(tea_cache_l1_thresh=tea_cache_thresh, **call_kwargs)
+                print(f"  TeaCache enabled (thresh={tea_cache_thresh}) — ~2-3x attention speedup")
+            except TypeError:
+                # Pipeline version doesn't support tea_cache_l1_thresh yet
+                print("  TeaCache: not supported by this pipeline build, running standard inference")
+                video_frames = pipe(**call_kwargs)
+        else:
+            video_frames = pipe(**call_kwargs)
+
         from diffsynth.utils.data import save_video
         save_video(video_frames, str(output_path), fps=15, quality=5)
         print(f"SUCCESS: Segment saved to {output_path}")
-        return 0
+        return {"status": "ok", "output_path": str(output_path)}
 
     except Exception as e:
         import traceback
-        print(f"ERROR: SVI inference failed: {e}")
-        traceback.print_exc()
-        return 1
+        msg = traceback.format_exc()
+        print(f"ERROR: SVI inference failed: {e}\n{msg}")
+        return {"status": "error", "error": str(e), "traceback": msg}
 
     finally:
         if ref_image_path and os.path.exists(ref_image_path):
@@ -318,6 +412,43 @@ def main() -> int:
                 os.unlink(ref_image_path)
             except OSError:
                 pass
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="VGA SVI Inference Bridge")
+    parser.add_argument("--config", required=True, help="Path to JSON config file")
+    args = parser.parse_args()
+
+    print("=== VGA SVI Inference Bridge ===")
+    verify_and_configure_attention()
+
+    config_path = Path(args.config)
+    if not config_path.exists():
+        print(f"ERROR: Config not found: {config_path}")
+        return 1
+
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+
+    lora_path_high = config["lora_path_high"]
+    lora_path_low = config["lora_path_low"]
+
+    if not Path(config.get("prev_segment_path", "")).exists():
+        print(f"ERROR: Previous segment not found: {config.get('prev_segment_path', '')}")
+        return 1
+
+    try:
+        print("Building SVI pipeline...")
+        pipe = build_pipeline(lora_path_high, lora_path_low)
+        result = run_inference(pipe, config)
+        if result["status"] == "ok":
+            return 0
+        print(f"ERROR: {result.get('error', 'unknown')}")
+        return 1
+    except Exception as e:
+        import traceback
+        print(f"ERROR: Pipeline setup failed: {e}")
+        traceback.print_exc()
+        return 1
 
 
 if __name__ == "__main__":
