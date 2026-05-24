@@ -6,7 +6,11 @@ Spec: VGA Model Stack Setup Guide v7.2 §2.4
 """
 from __future__ import annotations
 
+import json
 import logging
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -15,6 +19,20 @@ from vga.core.exceptions import CompositionPlanValidationError, ModelLoadError
 from vga.models.schemas import CompositionPlanSchema, VideoSegmentArtifact
 
 logger = logging.getLogger(__name__)
+
+_DIFFSYNTH_AVAILABLE: bool | None = None
+
+
+def _has_diffsynth() -> bool:
+    global _DIFFSYNTH_AVAILABLE
+    if _DIFFSYNTH_AVAILABLE is None:
+        try:
+            import diffsynth  # noqa: F401
+            from diffsynth.models.wan_video_dit import WanModel  # noqa: F401
+            _DIFFSYNTH_AVAILABLE = True
+        except ImportError:
+            _DIFFSYNTH_AVAILABLE = False
+    return _DIFFSYNTH_AVAILABLE
 
 
 class WanWrapper:
@@ -66,8 +84,12 @@ class WanWrapper:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if self._pipe == "ffmpeg_fallback":
-            # Create a still-image video as placeholder for pipeline testing
+        if self._pipe == "diffsynth_subprocess":
+            self._generate_via_subprocess(
+                init_image, prompt, composition_plan, output_path,
+                num_frames=num_frames, fps=fps, seed=seed,
+            )
+        elif self._pipe == "ffmpeg_fallback":
             logger.info("WanWrapper: using ffmpeg still-image fallback for Segment_1")
             self._create_still_video(init_image, output_path, fps=fps, num_frames=num_frames)
         else:
@@ -105,33 +127,92 @@ class WanWrapper:
     def _ensure_loaded(self) -> None:
         """Lazy-load Wan2.2-I2V pipeline.
 
-        The nalexand/Wan2.2-I2V-A14B-FP8 model uses a custom format (no model_index.json).
-        Falls back to ffmpeg-based still-image video when diffusers format is unavailable.
+        Prefer DiffSynth subprocess (SVI native FP8 format) if diffsynth is importable.
+        Falls back to ffmpeg still-image video when diffsynth is unavailable.
         """
         if self._pipe is not None:
             return
-        model_index = Path(settings.WAN22_MODEL_PATH) / "model_index.json"
-        if not model_index.exists():
+        if _has_diffsynth():
+            logger.info("WanWrapper: DiffSynth available — will use SVI subprocess for Segment_1")
+            self._pipe = "diffsynth_subprocess"
+        else:
             logger.warning(
-                "WanWrapper: no model_index.json at %s — using ffmpeg still-image fallback. "
-                "Install Wan-AI/Wan2.2-I2V-A14B-Diffusers for real video generation.",
-                settings.WAN22_MODEL_PATH,
+                "WanWrapper: diffsynth not available — using ffmpeg still-image fallback. "
+                "Install vita-epfl/Stable-Video-Infinity (svi_wan22 branch) for real I2V.",
             )
             self._pipe = "ffmpeg_fallback"
+
+    def _generate_via_subprocess(
+        self,
+        init_image: "PIL.Image.Image",
+        prompt: str,
+        composition_plan: CompositionPlanSchema,
+        output_path: Path,
+        num_frames: int = 81,
+        fps: int = 15,
+        seed: int = 42,
+    ) -> None:
+        """Generate Segment_1 via DiffSynth SVI subprocess with native FP8 format."""
+        inference_script = Path("/workspace/scripts/vga_svi_inference.py")
+        if not inference_script.exists():
+            logger.warning("WanWrapper: vga_svi_inference.py not found, falling back to ffmpeg")
+            self._create_still_video(init_image, output_path, fps=fps, num_frames=num_frames)
             return
+
+        # Save init_image to temp file for subprocess
+        tmp_img_path = None
+        cfg_path = None
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
+            tmp_img_path = f.name
         try:
-            from diffusers import WanImageToVideoPipeline
-            import torch
-            path = str(settings.WAN22_MODEL_PATH)
-            logger.info("WanWrapper: loading from %s", path)
-            self._pipe = WanImageToVideoPipeline.from_pretrained(
-                path,
-                torch_dtype=torch.bfloat16,
+            init_image.save(tmp_img_path, quality=95)
+            full_prompt = self._build_prompt(prompt, composition_plan)
+            lora_high = str(settings.SVI_HIGH_NOISE_PATH)
+            lora_low = str(settings.SVI_LOW_NOISE_PATH)
+            config = {
+                "init_image_path": tmp_img_path,
+                "output_path": str(output_path),
+                "prompt": full_prompt,
+                "cfg": settings.SVI_CFG_DEFAULT,
+                "steps": settings.STEPS_STANDARD,
+                "camera_motion": composition_plan.camera_motion,
+                "motion_vector": composition_plan.motion_vector,
+                "lora_path_high": lora_high,
+                "lora_path_low": lora_low,
+                "tea_cache_l1_thresh": 0.1,
+            }
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".json", delete=False
+            ) as cfg_f:
+                cfg_path = cfg_f.name
+                json.dump(config, cfg_f)
+
+            logger.info(
+                "WanWrapper: spawning DiffSynth I2V subprocess (Segment_1) cfg=%.1f steps=%d",
+                config["cfg"], config["steps"],
             )
-            self._pipe.enable_model_cpu_offload()
-            logger.info("WanWrapper: Wan2.2-I2V loaded")
+            result = subprocess.run(
+                [sys.executable, str(inference_script), "--config", cfg_path],
+                capture_output=False,
+                timeout=1800,
+            )
+            if result.returncode != 0:
+                logger.warning(
+                    "WanWrapper: DiffSynth subprocess failed (rc=%d), falling back to ffmpeg",
+                    result.returncode,
+                )
+                self._create_still_video(init_image, output_path, fps=fps, num_frames=num_frames)
         except Exception as exc:
-            raise ModelLoadError(f"WanWrapper failed to load: {exc}") from exc
+            logger.warning("WanWrapper: DiffSynth subprocess error: %s — ffmpeg fallback", exc)
+            self._create_still_video(init_image, output_path, fps=fps, num_frames=num_frames)
+        finally:
+            import os
+            for p in [tmp_img_path, cfg_path]:
+                if p:
+                    try:
+                        os.unlink(p)
+                    except OSError:
+                        pass
 
     @staticmethod
     def _build_prompt(base_prompt: str, plan: CompositionPlanSchema) -> str:

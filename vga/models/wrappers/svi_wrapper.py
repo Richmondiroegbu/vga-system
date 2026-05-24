@@ -43,7 +43,7 @@ from vga.core.exceptions import ModelLoadError, TemporalSegmentFailureError
 logger = logging.getLogger(__name__)
 
 _SVI_SERVER_PORT: int = getattr(settings, "SVI_SERVER_PORT", 8765)
-_SERVER_SCRIPT = Path("/workspace/vga/scripts/vga_svi_server.py")
+_SERVER_SCRIPT = Path("/workspace/scripts/vga_svi_server.py")
 
 
 class SVIWrapper:
@@ -189,12 +189,16 @@ class SVIWrapper:
             "--lora-path-high", str(settings.SVI_HIGH_NOISE_PATH),
             "--lora-path-low", str(settings.SVI_LOW_NOISE_PATH),
         ]
+        env = os.environ.copy()
+        env["SVI_GPU_RESIDENT"] = "0"          # CPU-offload required on 32GB VRAM pods
+        env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
         try:
             subprocess.Popen(
                 cmd,
                 stdout=log_fh,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,   # detach from parent process group
+                env=env,
             )
         except OSError as exc:
             logger.error("SVIWrapper: failed to start SVI server: %s", exc)
@@ -268,9 +272,7 @@ class SVIWrapper:
             scene_id, segment_id, config["cfg"], config["steps"],
         )
 
-        bridge_script = Path("/workspace/vga/scripts/vga_svi_inference.py")
-        if not bridge_script.exists():
-            bridge_script = settings.SVI_REPO_PATH / "vga_svi_inference.py"
+        bridge_script = Path("/workspace/scripts/vga_svi_inference.py")
 
         cmd = [
             settings.SVI_WAN22_PYTHON,

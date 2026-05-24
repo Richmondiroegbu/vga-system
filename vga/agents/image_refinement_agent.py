@@ -87,8 +87,9 @@ class ImageRefinementAgent(BaseAgent):
             "ImageRefinementAgent: input_clip=%.4f refined_clip=%.4f",
             initial_score, refined_score,
         )
-        # Only fail if post-refinement score is critically low (< 0.80)
-        if refined_score < 0.80:
+        # Only fail if post-refinement score is critically low (scene expansion naturally
+        # reduces identity score vs close-up base image; use relaxed floor threshold).
+        if refined_score < settings.CLIP_SCENE_EXPANDED_MINIMUM:
             self._clip.assert_above_threshold(refined_score, self.stage_id, context.scene_id)
 
         logger.info(

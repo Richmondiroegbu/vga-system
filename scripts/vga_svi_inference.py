@@ -275,8 +275,9 @@ def build_pipeline(lora_path_high: str, lora_path_low: str, device: str = "cuda"
     from diffsynth.models.wan_video_text_encoder import HuggingfaceTokenizer
 
     # GPU-resident mode: keeps FP8 DiTs on GPU to avoid PCIe round-trips per block.
-    # Disable with SVI_GPU_RESIDENT=0 if VRAM OOM occurs (e.g. pod has <30GB VRAM).
-    gpu_resident = os.environ.get("SVI_GPU_RESIDENT", "1") != "0"
+    # Disabled by default on RTX 5090 32GB: T5(4.4GB)+DiT-high(14.3)+DiT-low(14.3)=33GB > 32GB.
+    # Enable only on pods with >33GB VRAM (e.g. A100 40GB+).
+    gpu_resident = os.environ.get("SVI_GPU_RESIDENT", "0") != "0"
 
     pipe = WanVideoSviPipeline(device=device, torch_dtype=torch.bfloat16)
 
@@ -292,15 +293,10 @@ def build_pipeline(lora_path_high: str, lora_path_low: str, device: str = "cuda"
     pipe.text_encoder = model_pool.fetch_model("wan_video_text_encoder")
     pipe.vae = model_pool.fetch_model("wan_video_vae")
 
-    # Force PyTorch to return the CUDA allocator pool back to the GPU after T5/VAE
-    # offload. Without this, PyTorch's caching allocator holds onto the ~10GB T5
-    # VRAM even though the tensors are on CPU — leaving no room for the two 14GB DiTs.
-    if gpu_resident:
-        import gc as _gc
-        _gc.collect()
-        torch.cuda.empty_cache()
-        free_gb = (torch.cuda.mem_get_info()[0]) / 1e9
-        print(f"  VRAM after T5/VAE offload + cache clear: {free_gb:.1f}GB free")
+    # Note: GPU-resident DiTs require T5/VAE to be off-GPU when DiTs load.
+    # On RTX 5090 32GB this is not feasible (33GB needed > 32GB VRAM).
+    # CPU-offload mode (gpu_resident=False) is the safe default for 32GB pods;
+    # DiffSynth's offload_device="cpu" handles T5/VAE sequentially during inference.
 
     # === Load high-noise and low-noise DiTs AFTER T5/VAE have offloaded to CPU ===
     # GPU is now free for the two FP8 DiTs (28GB total on RTX 5090 32GB).
@@ -361,20 +357,26 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
     # higher values skip more (faster but may reduce quality). 0.0 disables.
     tea_cache_thresh = float(config.get("tea_cache_l1_thresh", 0.1))
 
-    if not prev_segment_path or not Path(prev_segment_path).exists():
-        return {"status": "error", "error": f"Previous segment not found: {prev_segment_path}"}
+    init_image_path = config.get("init_image_path", "")
+
+    if not init_image_path and (not prev_segment_path or not Path(prev_segment_path).exists()):
+        return {"status": "error", "error": f"Neither init_image_path nor prev_segment_path provided: {prev_segment_path}"}
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     ref_image_path = None
     try:
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
-            ref_image_path = f.name
-        print(f"Extracting last frame from {Path(prev_segment_path).name}...")
-        if not extract_last_frame(prev_segment_path, ref_image_path):
-            return {"status": "error", "error": "Failed to extract reference frame"}
-
-        ref_image = Image.open(ref_image_path).convert("RGB").resize((832, 480))
+        if init_image_path and Path(init_image_path).exists():
+            # S-08 mode: use initial image directly (Segment_1 from refined image, no prev segment)
+            print(f"Using init image directly: {Path(init_image_path).name}")
+            ref_image = Image.open(init_image_path).convert("RGB").resize((832, 480))
+        else:
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
+                ref_image_path = f.name
+            print(f"Extracting last frame from {Path(prev_segment_path).name}...")
+            if not extract_last_frame(prev_segment_path, ref_image_path):
+                return {"status": "error", "error": "Failed to extract reference frame"}
+            ref_image = Image.open(ref_image_path).convert("RGB").resize((832, 480))
 
         full_prompt = (
             f"{prompt}, {camera_motion}, motion: {motion_vector}, "
@@ -453,11 +455,14 @@ def main() -> int:
 
     config = json.loads(config_path.read_text(encoding="utf-8"))
 
-    lora_path_high = config["lora_path_high"]
-    lora_path_low = config["lora_path_low"]
+    lora_path_high = config.get("lora_path_high", "")
+    lora_path_low = config.get("lora_path_low", "")
 
-    if not Path(config.get("prev_segment_path", "")).exists():
-        print(f"ERROR: Previous segment not found: {config.get('prev_segment_path', '')}")
+    # Validate inputs: either init_image_path (S-08) or prev_segment_path (S-09+) required
+    init_image_path = config.get("init_image_path", "")
+    prev_segment_path = config.get("prev_segment_path", "")
+    if not init_image_path and not Path(prev_segment_path).exists():
+        print(f"ERROR: Neither init_image_path nor prev_segment_path found: {prev_segment_path}")
         return 1
 
     try:

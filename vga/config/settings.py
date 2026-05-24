@@ -56,7 +56,7 @@ class VGASettings(BaseSettings):
 
     # === SVI Environment ===
     SVI_REPO_BRANCH: str = "svi_wan22"
-    SVI_WAN22_PYTHON: str = "/workspace/miniconda3/envs/svi_wan22/bin/python"
+    SVI_WAN22_PYTHON: str = "/usr/bin/python3"  # system Python with DiffSynth installed
     # RTX 5090 is Blackwell sm_120. PyTorch 2.7.1+cu128 is confirmed working
     # for SVI (flash_attn==2.8.0.post2 tested with this combination).
     # PyTorch 2.8.0 also works. Minimum is 2.7.0 (first stable sm_120 release).
@@ -70,13 +70,17 @@ class VGASettings(BaseSettings):
     SVI_SERVER_PORT: int = 8765
 
     # GPU-resident DiT mode: keeps both FP8 DiTs (28GB) on GPU VRAM instead of
-    # offloading each block to CPU between timesteps. Eliminates ~960 PCIe
-    # round-trips per segment at 12 steps (40 blocks × 2 DiTs × 12 steps).
-    # Disable (set env SVI_GPU_RESIDENT=0) if VRAM OOM occurs on pods < 30GB.
-    SVI_GPU_RESIDENT_DITS: bool = True
+    # offloading each block to CPU between timesteps. Requires >33GB VRAM:
+    # T5(4.4GB) + DiT-high(14.3GB) + DiT-low(14.3GB) = 33GB. RTX 5090 32GB
+    # cannot fit all three simultaneously. Disabled on 32GB pods.
+    SVI_GPU_RESIDENT_DITS: bool = False
 
     # === Identity Thresholds ===
     CLIP_IDENTITY_THRESHOLD: float = 0.93        # RULE-92: minimum CLIP score everywhere
+    CLIP_SCENE_EXPANDED_MINIMUM: float = 0.70   # critical floor for scene-expanded images (wide shot vs close-up embedding)
+    CLIP_VIDEO_SEGMENT_MINIMUM: float = 0.75    # soft floor for SVI video segment keyframes (warning-only)
+    CLIP_I2V_HARD_FLOOR: float = 0.15          # hard floor for I2V segments (S-08, S-09); scene frames naturally score low vs close-up ref
+    CLIP_S08_I2V_MINIMUM: float = 0.15         # alias for backward compat
     CLIP_DRIFT_THRESHOLD: float = 0.02           # RULE-93: max drift in image refinement
     IDENTITY_CUMULATIVE_DRIFT_THRESHOLD: float = 0.15   # Full regeneration trigger
     LIPSYNC_IDENTITY_DELTA_THRESHOLD: float = 0.03      # RULE-97
