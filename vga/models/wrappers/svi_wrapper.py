@@ -115,6 +115,9 @@ class SVIWrapper:
             # 4-frame overlap: last 4 frames of prev segment condition next segment's first 4.
             # Caller must trim first 4 frames of continuation segments when assembling final video.
             "num_overlap_frames": 4,
+            # 0.75 = ~75% noise schedule; preserves coarse latent structure from overlap frames.
+            # 1.0 (pipeline default) = full noise, ignores input_video entirely → disjointed segments.
+            "denoising_strength": 0.75,
             # -1 = random seed per segment; fixed seed causes identical outputs across segments.
             "seed": -1,
             "prompt": prompt,

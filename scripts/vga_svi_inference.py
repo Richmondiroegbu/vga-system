@@ -344,6 +344,11 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
     motion_vector = config.get("motion_vector", "stationary")
     tea_cache_thresh = float(config.get("tea_cache_l1_thresh", 0.1))
     num_overlap_frames = int(config.get("num_overlap_frames", DEFAULT_OVERLAP_FRAMES))
+    # denoising_strength for continuation mode (S-09+):
+    #   1.0 = full noise, ignores input_video entirely (WRONG — fresh generation each segment)
+    #   0.75 = moderate noise, preserves structure from overlap frames (CORRECT — true continuation)
+    # S-08 I2V mode always uses 1.0 (we want full generation from the still image).
+    denoising_strength_continuation = float(config.get("denoising_strength", 0.75))
 
     # Seed: -1 or absent → random (important for continuation segments to vary)
     seed_val = config.get("seed", -1)
@@ -415,8 +420,13 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
                 }
             # Pass as input_video — the SVI pipeline uses these for temporal continuity.
             # Do NOT set input_image for continuation (that would reset to I2V mode).
+            # denoising_strength<1.0 is CRITICAL: at 1.0 (default) the pipeline adds full
+            # noise and ignores input_video entirely. At 0.75, it preserves the coarse
+            # latent structure from the overlap frames, producing true seamless continuation.
             call_kwargs["input_video"] = overlap_frames_pil
-            print(f"  Conditioning on {len(overlap_frames_pil)} overlap frames (input_video)")
+            call_kwargs["denoising_strength"] = denoising_strength_continuation
+            print(f"  Conditioning on {len(overlap_frames_pil)} overlap frames (input_video, "
+                  f"denoising_strength={denoising_strength_continuation})")
 
         print(f"Running SVI inference: cfg={cfg:.2f} steps={steps} seed={seed_val} → {output_path.name}")
 
