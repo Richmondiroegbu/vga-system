@@ -22,3 +22,6 @@ build/
 *.jsonl
 devtools_reports/
 snapshots/
+output/
+logs/
+session_controller.log
