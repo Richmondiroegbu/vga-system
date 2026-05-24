@@ -110,8 +110,13 @@ class SceneCompositionAgent(BaseAgent):
         return plan, new_context
 
     @staticmethod
-    def _build_prompt(plan: ScenePlanSchema, identity_design: dict) -> str:
-        char_desc = identity_design.get("character_identity", "main character")
+    def _build_prompt(plan: ScenePlanSchema, identity_design) -> str:
+        if hasattr(identity_design, "character_identity"):
+            char_desc = identity_design.character_identity
+        elif isinstance(identity_design, dict):
+            char_desc = identity_design.get("character_identity", "main character")
+        else:
+            char_desc = "main character"
         return (
             f"Create a CompositionPlan for this scene:\n"
             f"Scene ID: {plan.scene_id}\n"
