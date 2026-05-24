@@ -8,15 +8,11 @@ Spec: VGA Temporal Engine Spec v17.2 §TEMPORAL ENGINE AUTHORITY v17.2; RULE-86,
 from __future__ import annotations
 
 import logging
-import tempfile
 from pathlib import Path
 from typing import List
 
-import numpy as np
-
 from vga.config.settings import settings
 from vga.core.exceptions import (
-    AutoregressiveViolationError,
     CLIPValidationError,
     TemporalBufferError,
     TemporalSegmentFailureError,
@@ -25,7 +21,7 @@ from vga.models.schemas import SVIGenerationRecord, SVILoraSchedule, VideoSegmen
 from vga.state.immutable_context import ImmutableContext, MotionState, TemporalState
 from vga.temporal.motion_state_tracker import MotionStateTracker
 from vga.temporal.svi_scheduler import SVIScheduler
-from vga.temporal.temporal_buffer_manager import BUFFER_SIZE, TemporalBuffer, TemporalBufferManager
+from vga.temporal.temporal_buffer_manager import TemporalBuffer, TemporalBufferManager
 from vga.temporal.temporal_retry_controller import TemporalRetryController
 from vga.temporal.temporal_authority_guard import TemporalAuthorityGuard
 from vga.validation.clip_validator import CLIPValidator
@@ -228,34 +224,20 @@ class TemporalEngine:
         """
         scheduler = SVIScheduler(cfg=cfg, steps=steps)
 
-        # === Step 1: Encode buffer → 5-frame latents (RULE-87) ===
-        latents = self._buffer_manager.encode(buffer)
-
-        # RULE-87: assert latent is 5-frame, NOT single-frame
-        if latents.shape[0] != BUFFER_SIZE:
-            raise AutoregressiveViolationError(
-                f"Encoded latent shape[0]={latents.shape[0]} must be {BUFFER_SIZE}. "
-                f"Single-frame conditioning is FORBIDDEN. RULE-87."
-            )
-
-        # Save latents to temp file for subprocess
-        with tempfile.NamedTemporaryFile(suffix=".npy", delete=False) as f:
-            latent_path = f.name
-        np.save(latent_path, latents)
-
-        # === Step 2: Build prompt from segment plan ===
+        # === Step 1: Build prompt from segment plan ===
         prompt = getattr(plan, "action_description", "cinematic scene continuation")
         camera_motion = context.camera_state.motion
         motion_vector = context.composition_plan.motion_vector if context.composition_plan else "stationary"
 
-        # === Step 3: Invoke SVI subprocess ===
+        # === Step 2: Invoke SVI subprocess ===
         output_path = output_dir / f"segment_{segment_number:03d}.mp4"
+        prev_segment_path = output_dir / f"segment_{segment_number - 1:03d}.mp4"
         from vga.models.wrappers.svi_wrapper import SVIWrapper
         svi = SVIWrapper()
         lora_schedule = scheduler.build_lora_schedule()
 
         svi.generate_segment(
-            init_latents_path=latent_path,
+            init_latents_path=str(prev_segment_path),
             prompt=prompt,
             cfg=scheduler.cfg,
             steps=scheduler.get_steps(),
@@ -269,20 +251,20 @@ class TemporalEngine:
             segment_id=segment_number,
         )
 
-        # === Step 4: Validate triple (CLIP + continuity + buffer) ===
+        # === Step 3: Validate triple (CLIP + continuity + buffer) ===
         clip_score = self._validate_segment_triple(
             output_path=output_path,
             context=context,
             buffer=buffer,
         )
 
-        # === Step 5: Update TemporalBuffer ===
+        # === Step 4: Update TemporalBuffer ===
         new_buffer = self._buffer_manager.update(buffer, str(output_path))
 
-        # === Step 6: Estimate MotionState ===
+        # === Step 5: Estimate MotionState ===
         motion_state = self._motion_tracker.estimate(new_buffer)
 
-        # === Step 7: Evolve context ===
+        # === Step 6: Evolve context ===
         new_context = context.evolve(motion_state=motion_state)
 
         # Log SVI generation record

@@ -3,24 +3,33 @@
 VGA SVI Inference Bridge — runs inside svi_wan22 conda env.
 Called by SVIWrapper via subprocess with a JSON config file.
 
+Two operation modes
+-------------------
+  S-08 (Segment_1):  init_image_path provided → I2V from single character image.
+
+  S-09+ (Segments 2..N): prev_segment_path provided → TRUE SVI CONTINUATION.
+    Extracts the last `num_overlap_frames` (default 4) frames from the previous
+    segment and passes them as `input_video` to WanVideoSviPipeline.
+    This gives the model MULTI-FRAME temporal context so each new segment
+    continues naturally from where the previous ended.
+
+    WRONG (old): extract 1 frame → input_image  (= fresh I2V, no motion context)
+    RIGHT:       extract N frames → input_video  (= SVI temporal continuation)
+
+    The first `num_overlap_frames` of each continuation segment will closely
+    match the last `num_overlap_frames` of the previous segment, providing
+    the seamless join. The caller (test_pipeline.py / AssemblyAgent) must
+    trim those overlap frames when concatenating segments into the final video.
+
 Direct FP8 model loading: loads Wan2.2-I2V-A14B FP8 split-block format
-by reconstructing proper key prefixes, bypassing ModelScope/HuggingFace downloads.
-
-GPU-resident DiT mode (SVI_GPU_RESIDENT=1, default ON):
-  Both FP8 DiTs (14GB each = 28GB total) stay in GPU VRAM the entire inference.
-  FP8→BF16 casts happen on-GPU with no PCIe transfers per block, eliminating
-  the ~960 PCIe round-trips that were the primary inference bottleneck.
-  RTX 5090 (32GB) fits both DiTs (28GB) + activations (~2GB).
-
-CPU-offload mode (SVI_GPU_RESIDENT=0):
-  Legacy mode: each DiTBlock is moved CPU→GPU per timestep (safe but slow).
-  Use this if VRAM OOM occurs in GPU-resident mode.
+by reconstructing proper key prefixes, bypassing ModelScope/HuggingFace.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import random
 import sys
 import tempfile
 from pathlib import Path
@@ -33,21 +42,17 @@ if SVI_REPO not in sys.path:
 
 WAN22_DIR = "/workspace/models/wan22"
 
+# Default overlap: 4 frames shared between consecutive segments.
+# Assembly trims the first 4 frames of each continuation segment.
+DEFAULT_OVERLAP_FRAMES = 4
+
 
 def verify_and_configure_attention() -> bool:
-    """Verify FlashAttention-2 availability and configure PyTorch SDPA backend.
-
-    Returns True if flash_attn package is importable.
-    """
-    # Configure PyTorch SDPA backends. Flash Attention is fastest but requires
-    # head_dim <= 256. The VAE uses head_dim=384, so it falls back to
-    # mem_efficient_sdp. Leave all backends enabled; PyTorch picks the best
-    # available kernel per operation. Disabling math_sdp prevents the slow
-    # non-fused fallback on large sequences.
+    """Verify FlashAttention-2 availability and configure PyTorch SDPA backend."""
     if hasattr(torch.backends.cuda, "enable_flash_sdp"):
-        torch.backends.cuda.enable_flash_sdp(True)           # DiT attention (head_dim ≤ 256)
-        torch.backends.cuda.enable_mem_efficient_sdp(True)   # VAE attention (head_dim=384)
-        torch.backends.cuda.enable_math_sdp(False)           # disable slow O(n²) fallback
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+        torch.backends.cuda.enable_math_sdp(False)
         print("  PyTorch SDPA: Flash+MemEfficient ENABLED, math (slow) disabled")
     else:
         print("  PyTorch SDPA: enable_flash_sdp not available (PyTorch too old?)")
@@ -71,7 +76,7 @@ def verify_and_configure_attention() -> bool:
 
 
 def extract_last_frame(video_path: str, output_image_path: str) -> bool:
-    """Extract last frame from a video file and save as JPEG."""
+    """Extract last frame from a video file and save as JPEG (kept for diagnostics)."""
     try:
         import cv2
         cap = cv2.VideoCapture(video_path)
@@ -89,27 +94,39 @@ def extract_last_frame(video_path: str, output_image_path: str) -> bool:
         return False
 
 
-def load_fp8_state_dict(fp8_dir: str) -> dict:
-    """Load Wan2.2 FP8 split-block model, reconstructing proper key prefixes.
+def extract_last_n_frames_as_pil(video_path: str, n: int) -> list:
+    """Extract the last n frames from a video and return as list of PIL Images.
 
-    Keeps tensors in their native FP8 dtype (float8_e4m3fn) to minimize RAM.
-    Two 14GB FP8 DiTs = 28GB total, well within the 43GB cgroup limit.
-    VRAM management casts FP8→BF16 during computation (per-block, on-demand).
-
-    FP8 files layout:
-      blocks.N.safetensors  (N=0..39): block tensors WITHOUT block prefix
-      head.safetensors: head.bias, head.weight, modulation (WITH head. prefix)
-      patch_embedding.safetensors, text_embedding.safetensors, etc.
-
-    WanModel state_dict key mapping:
-      blocks.N.<key>           ← blocks.N.safetensors/<key>
-      head.head.bias/weight    ← head.safetensors/head.bias, head.weight
-      head.modulation          ← head.safetensors/modulation
-      patch_embedding.<key>    ← patch_embedding.safetensors/<key>
-      text_embedding.<key>     ← text_embedding.safetensors/<key>
-      time_embedding.<key>     ← time_embedding.safetensors/<key>
-      time_projection.<key>    ← time_projection.safetensors/<key>
+    Used for SVI continuation mode (input_video parameter).
+    Each returned image is resized to 832×480 (Wan2.2 inference resolution).
     """
+    from PIL import Image
+    frames = []
+    try:
+        import cv2
+        cap = cv2.VideoCapture(video_path)
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total == 0:
+            print(f"ERROR: {video_path} has 0 frames")
+            return frames
+        start = max(0, total - n)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start)
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            pil_img = Image.fromarray(rgb).resize((832, 480), Image.LANCZOS)
+            frames.append(pil_img)
+        cap.release()
+        print(f"  Extracted {len(frames)} overlap frames from {Path(video_path).name}")
+    except Exception as e:
+        print(f"ERROR extracting frames as PIL: {e}")
+    return frames
+
+
+def load_fp8_state_dict(fp8_dir: str) -> dict:
+    """Load Wan2.2 FP8 split-block model, reconstructing proper key prefixes."""
     from safetensors import safe_open
 
     state_dict = {}
@@ -128,7 +145,7 @@ def load_fp8_state_dict(fp8_dir: str) -> dict:
         ("text_embedding.safetensors", "text_embedding."),
         ("time_embedding.safetensors", "time_embedding."),
         ("time_projection.safetensors", "time_projection."),
-        ("head.safetensors", "head."),  # head.bias→head.head.bias, modulation→head.modulation
+        ("head.safetensors", "head."),
     ]:
         with safe_open(str(fp8_dir / fname), framework="pt", device="cpu") as f:
             for key in f.keys():
@@ -142,17 +159,7 @@ def apply_vram_management(
     device: str = "cuda",
     gpu_resident: bool = True,
 ) -> None:
-    """Apply DiffSynth block-wise VRAM management to a WanModel with FP8 weights.
-
-    gpu_resident=True (default, RTX 5090 recommended):
-      Both FP8 DiTs stay on GPU. No PCIe transfers during inference.
-      FP8→BF16 cast happens on-GPU per block (fast). Requires 28GB+ VRAM.
-      Eliminates 960 PCIe round-trips at 12 steps (40 blocks × 2 DiTs × 12 steps).
-
-    gpu_resident=False (CPU-offload fallback):
-      Each DiTBlock migrates CPU→GPU→CPU per timestep via PCIe (~960 transfers).
-      Safe for constrained VRAM; use if VRAM OOM occurs with gpu_resident=True.
-    """
+    """Apply DiffSynth block-wise VRAM management to a WanModel with FP8 weights."""
     from diffsynth.core.vram.layers import (
         enable_vram_management,
         AutoWrappedModule,
@@ -167,23 +174,18 @@ def apply_vram_management(
         AutoWrappedLinear = AutoWrappedModule
 
     if gpu_resident:
-        # GPU-resident: blocks stay on GPU in FP8 between timesteps.
-        # computation_device=device triggers GPU-side FP8→BF16 cast (no PCIe).
-        # After forward: BF16 copy freed, block stays on GPU as FP8.
         vram_config = {
             "offload_dtype": torch.float8_e4m3fn,
-            "offload_device": device,       # stay on GPU between uses
+            "offload_device": device,
             "onload_dtype": torch.float8_e4m3fn,
-            "onload_device": device,        # already on GPU, no-op
+            "onload_device": device,
             "preparing_dtype": torch.float8_e4m3fn,
-            "preparing_device": device,     # GPU prepare — no-op
+            "preparing_device": device,
             "computation_dtype": torch.bfloat16,
-            "computation_device": device,   # GPU BF16 cast, no PCIe transfer
+            "computation_device": device,
         }
         print(f"  VRAM mode: GPU-resident FP8 (no PCIe per block, {device})")
     else:
-        # CPU-offload: safe for VRAM-constrained environments, slower.
-        # Each block: CPU FP8 → GPU BF16 → compute → GPU freed → back on CPU.
         vram_config = {
             "offload_dtype": torch.float8_e4m3fn,
             "offload_device": "cpu",
@@ -246,15 +248,13 @@ def load_wan_dit_fp8(
         print(f"  WARNING: {len(missing)} missing keys (first 5): {missing[:5]}")
     if unexpected:
         print(f"  WARNING: {len(unexpected)} unexpected keys (first 5): {unexpected[:5]}")
-    del state_dict  # explicitly release dict (model now owns the tensors)
+    del state_dict
 
     mode_label = "GPU-resident FP8" if gpu_resident else "CPU-offload FP8→BF16"
     print(f"  Applying VRAM management ({mode_label})...")
     apply_vram_management(model, device=device, gpu_resident=gpu_resident)
 
     if gpu_resident:
-        # One-time 14GB PCIe transfer: move FP8 weights to GPU now.
-        # After this, all 40 blocks live on GPU — no further PCIe during inference.
         vram_gb = sum(p.numel() * p.element_size() for p in model.parameters()) / 1e9
         print(f"  Moving FP8 DiT to {device} (one-time {vram_gb:.1f}GB transfer)...")
         model = model.to(device)
@@ -264,28 +264,15 @@ def load_wan_dit_fp8(
 
 
 def build_pipeline(lora_path_high: str, lora_path_low: str, device: str = "cuda") -> "WanVideoSviPipeline":
-    """Build WanVideoSviPipeline with local FP8 DiTs + BF16 T5/VAE.
-
-    SVI_GPU_RESIDENT env var (default=1):
-      1 → both FP8 DiTs stay on GPU (fast, requires 32GB VRAM)
-      0 → CPU-offload per block (safe, slow — legacy behaviour)
-    """
+    """Build WanVideoSviPipeline with local FP8 DiTs + BF16 T5/VAE."""
     from diffsynth.pipelines.wan_video_svi import WanVideoSviPipeline
     from diffsynth.core.loader.config import ModelConfig
     from diffsynth.models.wan_video_text_encoder import HuggingfaceTokenizer
 
-    # GPU-resident mode: keeps FP8 DiTs on GPU to avoid PCIe round-trips per block.
-    # Disabled by default on RTX 5090 32GB: T5(4.4GB)+DiT-high(14.3)+DiT-low(14.3)=33GB > 32GB.
-    # Enable only on pods with >33GB VRAM (e.g. A100 40GB+).
     gpu_resident = os.environ.get("SVI_GPU_RESIDENT", "0") != "0"
 
     pipe = WanVideoSviPipeline(device=device, torch_dtype=torch.bfloat16)
 
-    # === Load T5 text encoder and VAE FIRST (DiffSynth loads them to GPU initially,
-    #     then offloads to CPU per offload_device="cpu"). Must happen BEFORE the
-    #     GPU-resident DiTs are placed in VRAM or there is no room left.
-    #     GPU budget: T5 loads (~10GB BF16) → offloads to CPU → VAE (~1GB) → offloads.
-    #     After both offload: ~0GB GPU used, ready for the two 14GB FP8 DiTs (28GB). ===
     print("Loading T5 text encoder and VAE (offloads to CPU)...")
     t5_config = ModelConfig(path=f"{WAN22_DIR}/models_t5_umt5-xxl-enc-bf16.pth", offload_device="cpu")
     vae_config = ModelConfig(path=f"{WAN22_DIR}/Wan2.1_VAE.pth", offload_device="cpu")
@@ -293,13 +280,6 @@ def build_pipeline(lora_path_high: str, lora_path_low: str, device: str = "cuda"
     pipe.text_encoder = model_pool.fetch_model("wan_video_text_encoder")
     pipe.vae = model_pool.fetch_model("wan_video_vae")
 
-    # Note: GPU-resident DiTs require T5/VAE to be off-GPU when DiTs load.
-    # On RTX 5090 32GB this is not feasible (33GB needed > 32GB VRAM).
-    # CPU-offload mode (gpu_resident=False) is the safe default for 32GB pods;
-    # DiffSynth's offload_device="cpu" handles T5/VAE sequentially during inference.
-
-    # === Load high-noise and low-noise DiTs AFTER T5/VAE have offloaded to CPU ===
-    # GPU is now free for the two FP8 DiTs (28GB total on RTX 5090 32GB).
     print(f"Loading high-noise DiT (FP8, gpu_resident={gpu_resident})...")
     pipe.dit = load_wan_dit_fp8(
         f"{WAN22_DIR}/high_noise_model_fp8", device=device, gpu_resident=gpu_resident
@@ -310,7 +290,6 @@ def build_pipeline(lora_path_high: str, lora_path_low: str, device: str = "cuda"
         f"{WAN22_DIR}/low_noise_model_fp8", device=device, gpu_resident=gpu_resident
     )
 
-    # === Load tokenizer from local path ===
     print("Loading tokenizer...")
     pipe.tokenizer = HuggingfaceTokenizer(
         name=f"{WAN22_DIR}/google/umt5-xxl",
@@ -318,7 +297,6 @@ def build_pipeline(lora_path_high: str, lora_path_low: str, device: str = "cuda"
         clean="whitespace",
     )
 
-    # === Apply SVI LoRAs for temporal consistency ===
     if os.path.exists(lora_path_high):
         print(f"Applying high-noise LoRA: {Path(lora_path_high).name}")
         pipe.load_lora(pipe.dit, lora_path_high, alpha=1)
@@ -339,74 +317,111 @@ def build_pipeline(lora_path_high: str, lora_path_low: str, device: str = "cuda"
 def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
     """Execute one SVI inference request against an already-loaded pipeline.
 
-    Called both by main() (standalone subprocess mode) and by vga_svi_server.py
-    (persistent server mode). Keeping inference logic here avoids duplication.
+    Two modes
+    ---------
+    S-08 (init_image_path set):
+        I2V from a single character image. The pipeline generates 81 frames
+        that animate the character starting from the provided image.
 
-    Returns {"status": "ok", "output_path": str} or {"status": "error", "error": str}.
+    S-09+ (prev_segment_path set):
+        TRUE SVI CONTINUATION. The last `num_overlap_frames` (default 4) frames
+        of the previous segment are extracted and passed as `input_video`.
+        The pipeline generates 81 frames where the first ~4 closely continue
+        from the conditioning frames, creating a seamless join.
+
+        The caller must trim the first `num_overlap_frames` when assembling
+        the final video to avoid visual duplication at segment boundaries.
     """
     from PIL import Image
 
     output_path = Path(config["output_path"])
     prev_segment_path = config.get("prev_segment_path", "")
+    init_image_path = config.get("init_image_path", "")
     prompt = config.get("prompt", "cinematic scene, photorealistic")
     cfg = float(config.get("cfg", 5.5))
     steps = int(config.get("steps", 12))
     camera_motion = config.get("camera_motion", "static")
     motion_vector = config.get("motion_vector", "stationary")
-    # TeaCache: DiffSynth attention caching for 2-3x speedup. Threshold 0.1 is safe;
-    # higher values skip more (faster but may reduce quality). 0.0 disables.
     tea_cache_thresh = float(config.get("tea_cache_l1_thresh", 0.1))
+    num_overlap_frames = int(config.get("num_overlap_frames", DEFAULT_OVERLAP_FRAMES))
 
-    init_image_path = config.get("init_image_path", "")
+    # Seed: -1 or absent → random (important for continuation segments to vary)
+    seed_val = config.get("seed", -1)
+    if seed_val is None or int(seed_val) < 0:
+        seed_val = random.randint(0, 2**31 - 1)
+        print(f"  Using random seed: {seed_val}")
+    else:
+        seed_val = int(seed_val)
+        print(f"  Using fixed seed: {seed_val}")
 
     if not init_image_path and (not prev_segment_path or not Path(prev_segment_path).exists()):
-        return {"status": "error", "error": f"Neither init_image_path nor prev_segment_path provided: {prev_segment_path}"}
+        return {
+            "status": "error",
+            "error": f"Neither init_image_path nor valid prev_segment_path provided: {prev_segment_path}",
+        }
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    ref_image_path = None
+    # Cinematic prompt — purely visual/descriptive, no character names (names cause
+    # DiffSynth to render floating text rather than animate the character).
+    full_prompt = (
+        f"{prompt}, {camera_motion}, motion: {motion_vector}, "
+        "cinematic quality, photorealistic, temporal consistency"
+    )
+    negative_prompt = (
+        "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，"
+        "最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，"
+        "画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，"
+        "杂乱的背景，三条腿，背景人很多，倒着走"
+    )
+
     try:
-        if init_image_path and Path(init_image_path).exists():
-            # S-08 mode: use initial image directly (Segment_1 from refined image, no prev segment)
-            print(f"Using init image directly: {Path(init_image_path).name}")
-            ref_image = Image.open(init_image_path).convert("RGB").resize((832, 480))
-        else:
-            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
-                ref_image_path = f.name
-            print(f"Extracting last frame from {Path(prev_segment_path).name}...")
-            if not extract_last_frame(prev_segment_path, ref_image_path):
-                return {"status": "error", "error": "Failed to extract reference frame"}
-            ref_image = Image.open(ref_image_path).convert("RGB").resize((832, 480))
-
-        full_prompt = (
-            f"{prompt}, {camera_motion}, motion: {motion_vector}, "
-            "cinematic quality, photorealistic, temporal consistency"
-        )
-        negative_prompt = (
-            "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，"
-            "最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，"
-            "画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，"
-            "杂乱的背景，三条腿，背景人很多，倒着走"
-        )
-
+        # === Base call kwargs (common to both modes) ===
         call_kwargs: dict = dict(
             prompt=full_prompt,
             negative_prompt=negative_prompt,
-            input_image=ref_image,
             height=480,
             width=832,
             num_frames=81,
             cfg_scale=cfg,
             num_inference_steps=steps,
             tiled=False,
-            seed=42,
+            seed=seed_val,
         )
 
-        print(f"Running SVI inference: cfg={cfg:.2f} steps={steps} → {output_path.name}")
+        if init_image_path and Path(init_image_path).exists():
+            # ── S-08 MODE: I2V from single character image ──────────────────
+            # The init_image is the refined character portrait from S-07.
+            # DiffSynth animates this image into 81 frames.
+            print(f"[S-08 I2V] Using init image: {Path(init_image_path).name}")
+            ref_image = Image.open(init_image_path).convert("RGB").resize((832, 480), Image.LANCZOS)
+            call_kwargs["input_image"] = ref_image
+
+        else:
+            # ── S-09+ MODE: TRUE SVI CONTINUATION via input_video ───────────
+            # Extract last N frames of previous segment as PIL Images.
+            # These become the conditioning context for the new segment.
+            # The first N frames of the output will naturally continue from
+            # those conditioning frames → seamless temporal join.
+            print(f"[S-09 CONTINUATION] Extracting {num_overlap_frames} overlap frames "
+                  f"from {Path(prev_segment_path).name}...")
+            overlap_frames_pil = extract_last_n_frames_as_pil(
+                prev_segment_path, n=num_overlap_frames
+            )
+            if not overlap_frames_pil:
+                return {
+                    "status": "error",
+                    "error": f"Failed to extract overlap frames from {prev_segment_path}",
+                }
+            # Pass as input_video — the SVI pipeline uses these for temporal continuity.
+            # Do NOT set input_image for continuation (that would reset to I2V mode).
+            call_kwargs["input_video"] = overlap_frames_pil
+            print(f"  Conditioning on {len(overlap_frames_pil)} overlap frames (input_video)")
+
+        print(f"Running SVI inference: cfg={cfg:.2f} steps={steps} seed={seed_val} → {output_path.name}")
+
+        tea_model_id = "Wan2.1-I2V-14B-480P"
         if tea_cache_thresh > 0.0:
-            # Wan2.2-I2V-A14B shares the Wan2.1-I2V-14B-480P architecture.
-            # TeaCache uses this profile for its rel_l1 thresholds.
-            tea_model_id = "Wan2.1-I2V-14B-480P"
             try:
                 video_frames = pipe(
                     tea_cache_l1_thresh=tea_cache_thresh,
@@ -415,7 +430,6 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
                 )
                 print(f"  TeaCache enabled (thresh={tea_cache_thresh}, id={tea_model_id}) — ~2-3x speedup")
             except (TypeError, ValueError):
-                # Pipeline version doesn't support TeaCache or model_id not recognised
                 print("  TeaCache: not supported by this pipeline build, running standard inference")
                 video_frames = pipe(**call_kwargs)
         else:
@@ -424,20 +438,18 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
         from diffsynth.utils.data import save_video
         save_video(video_frames, str(output_path), fps=15, quality=5)
         print(f"SUCCESS: Segment saved to {output_path}")
-        return {"status": "ok", "output_path": str(output_path)}
+        return {
+            "status": "ok",
+            "output_path": str(output_path),
+            "num_overlap_frames": num_overlap_frames,
+            "seed": seed_val,
+        }
 
     except Exception as e:
         import traceback
         msg = traceback.format_exc()
         print(f"ERROR: SVI inference failed: {e}\n{msg}")
         return {"status": "error", "error": str(e), "traceback": msg}
-
-    finally:
-        if ref_image_path and os.path.exists(ref_image_path):
-            try:
-                os.unlink(ref_image_path)
-            except OSError:
-                pass
 
 
 def main() -> int:
@@ -458,7 +470,6 @@ def main() -> int:
     lora_path_high = config.get("lora_path_high", "")
     lora_path_low = config.get("lora_path_low", "")
 
-    # Validate inputs: either init_image_path (S-08) or prev_segment_path (S-09+) required
     init_image_path = config.get("init_image_path", "")
     prev_segment_path = config.get("prev_segment_path", "")
     if not init_image_path and not Path(prev_segment_path).exists():

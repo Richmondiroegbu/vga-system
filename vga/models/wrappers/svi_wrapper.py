@@ -112,6 +112,11 @@ class SVIWrapper:
 
         infer_config = {
             "prev_segment_path": str(prev_segment_path),
+            # 4-frame overlap: last 4 frames of prev segment condition next segment's first 4.
+            # Caller must trim first 4 frames of continuation segments when assembling final video.
+            "num_overlap_frames": 4,
+            # -1 = random seed per segment; fixed seed causes identical outputs across segments.
+            "seed": -1,
             "prompt": prompt,
             "cfg": cfg,
             "steps": steps,

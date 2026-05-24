@@ -49,6 +49,79 @@ def _free_vram_for_heavy_model():
         pass
 
 
+def _assemble_final_video(
+    segment_paths: list,
+    output_path: str,
+    overlap_frames: int = 4,
+    fps: int = 15,
+) -> None:
+    """Concatenate video segments into one coherent video, trimming SVI overlap frames.
+
+    Segment 1 is kept in full.  Segments 2..N each start overlap_frames frames in,
+    because SVI continuation mode makes the first N frames replicate the end of the
+    previous segment — trimming them yields a seamless join with no duplicated content.
+    """
+    import shutil
+
+    if not segment_paths:
+        logger.error("Assembly: no segments provided")
+        return
+
+    if len(segment_paths) == 1:
+        shutil.copy2(segment_paths[0], output_path)
+        logger.info("Assembly: single segment copied → %s", output_path)
+        return
+
+    # Build ffmpeg filter_complex:
+    #   [0:v] → pass through unchanged (full Segment_1)
+    #   [i:v] for i>0 → trim=start_frame=N,setpts=PTS-STARTPTS  (drop overlap frames)
+    # Then concat all trimmed streams.
+    filter_parts = []
+    for i, _ in enumerate(segment_paths):
+        label = f"[v{i}]"
+        if i == 0:
+            filter_parts.append(f"[0:v]null{label}")
+        else:
+            filter_parts.append(
+                f"[{i}:v]trim=start_frame={overlap_frames},setpts=PTS-STARTPTS{label}"
+            )
+    concat_inputs = "".join(f"[v{i}]" for i in range(len(segment_paths)))
+    filter_complex = (
+        ";".join(filter_parts)
+        + f";{concat_inputs}concat=n={len(segment_paths)}:v=1:a=0[outv]"
+    )
+
+    input_args = []
+    for seg_path in segment_paths:
+        input_args += ["-i", seg_path]
+
+    cmd = (
+        ["ffmpeg", "-y"]
+        + input_args
+        + [
+            "-filter_complex", filter_complex,
+            "-map", "[outv]",
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "18",
+            "-pix_fmt", "yuv420p",
+            output_path,
+        ]
+    )
+
+    n_segs = len(segment_paths)
+    trimmed_frames = overlap_frames * (n_segs - 1)
+    logger.info(
+        "Assembly: %d segments → %s (trimming %d overlap frames at %d joins)",
+        n_segs, output_path, trimmed_frames, n_segs - 1,
+    )
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        logger.error("Assembly failed (rc=%d):\n%s", result.returncode, result.stderr[-2000:])
+    else:
+        logger.info("Assembly complete → %s", output_path)
+
+
 def main():
     # Imports after env is set
     from vga.state.context_factory import ContextFactory
@@ -168,12 +241,18 @@ def main():
     # S-08: Video Segment 1 (Wan2.2-I2V — also needs ~17GB, runs standalone)
     t0 = time.monotonic()
     logger.info("=== S-08: Video Segment 1 (Wan2.2 I2V) ===")
+    # Prompt uses visual descriptors only — no character names.
+    # Character names in prompts cause DiffSynth to render floating text instead of animating.
+    s08_prompt = (
+        f"cinematic scene, {out_s03.character_identity}, "
+        f"{scene_plan_0.setting}, dramatic motivational atmosphere, photorealistic"
+    )
     out_s08, ctx = orch.execute_stage(
         VideoSegmentGenerator(),
         {
             "refined_image": out_s07["refined_image"],
             "output_dir": "/workspace/output/test_e2e_001/scene_001",
-            "prompt": f"cinematic motivational scene, {scene_plan_0.emotional_beat}",
+            "prompt": s08_prompt,
         },
         ctx,
     )
@@ -211,6 +290,20 @@ def main():
     if out_s09:
         for seg in out_s09["segments"]:
             logger.info("Segment %s: %s", seg.segment_id, seg.file_path)
+
+    # ── Final Assembly: concatenate all segments into one coherent video ─────────
+    # SVI continuation mode produces 4-frame overlap between segments:
+    #   - Segment_1 is kept in full (81 frames ≈ 5.4s)
+    #   - Segments 2..N each have their first 4 frames trimmed (those frames closely
+    #     replicate the end of the previous segment, providing the seamless join)
+    # Assembly trims the overlap and concatenates into scene_001_final.mp4.
+    _assemble_final_video(
+        segment_paths=[out_s08["segment_1"].file_path]
+        + ([seg.file_path for seg in out_s09["segments"]] if out_s09 else []),
+        output_path="/workspace/output/test_e2e_001/scene_001/scene_001_final.mp4",
+        overlap_frames=4,
+        fps=15,
+    )
 
 
 if __name__ == "__main__":
