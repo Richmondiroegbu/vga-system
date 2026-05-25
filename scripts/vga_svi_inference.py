@@ -57,6 +57,12 @@ WAN22_DIR = "/workspace/models/wan22"
 # source frames for pixel-identical seams.
 DEFAULT_OVERLAP_FRAMES = 5
 
+# Wan2.2 VAE temporal stride = 4. With N input_video frames, the encoded latent
+# has (N-1)//4 + 1 temporal frames. Passing >4 frames gives 2 latents, which
+# mismatches the pipeline's internal concatenation → crash. 4 is the max that
+# gives exactly 1 temporal latent, which the SVI pipeline expects for input_video.
+_MAX_INPUT_VIDEO_FRAMES = 4
+
 
 def verify_and_configure_attention() -> bool:
     """Verify FlashAttention-2 availability and configure PyTorch SDPA backend."""
@@ -440,11 +446,17 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
                     "error": f"Failed to extract overlap frames from {prev_segment_path}",
                 }
             last_frame = overlap_frames_pil[-1]  # last frame → image conditioning (y)
-            call_kwargs["input_image"] = last_frame          # 20ch: mask + VAE encoding
-            call_kwargs["input_video"] = overlap_frames_pil  # 16ch: video latents
+            # The Wan2.2 VAE temporal stride is 4: N frames → (N-1)//4 + 1 latents.
+            # input_video must map to exactly 1 latent (max 4 frames).
+            # We extract num_overlap_frames (5) for hard replacement but only pass
+            # the last _MAX_INPUT_VIDEO_FRAMES (4) to the pipeline for conditioning.
+            conditioning_frames = overlap_frames_pil[-_MAX_INPUT_VIDEO_FRAMES:]
+            call_kwargs["input_image"] = last_frame           # 20ch: mask + VAE encoding
+            call_kwargs["input_video"] = conditioning_frames  # 16ch: video latents (max 4)
             call_kwargs["denoising_strength"] = denoising_strength_continuation
             print(f"  input_image: last frame (image conditioning, 20ch)")
-            print(f"  input_video: {len(overlap_frames_pil)} overlap frames (video latents, 16ch)")
+            print(f"  input_video: {len(conditioning_frames)} conditioning frames (VAE constraint, 16ch)")
+            print(f"  hard replace: first {len(overlap_frames_pil)} output frames ← exact source frames")
             print(f"  36ch total = 16 + 20 ✓  denoising_strength={denoising_strength_continuation}")
 
         print(f"Running SVI inference: cfg={cfg:.2f} steps={steps} seed={seed_val} → {output_path.name}")
