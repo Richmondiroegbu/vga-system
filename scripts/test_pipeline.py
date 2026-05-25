@@ -301,10 +301,10 @@ def main():
         segment_paths=[out_s08["segment_1"].file_path]
         + ([seg.file_path for seg in out_s09["segments"]] if out_s09 else []),
         output_path="/workspace/output/test_e2e_001/scene_001/scene_001_final.mp4",
-        # SVI continuation passes 4 overlap frames as input_video conditioning.
-        # The first 4 frames of each continuation segment replicate the end of
-        # the previous segment — trim them to prevent visual duplication.
-        overlap_frames=4,
+        # SVI continuation uses 5 overlap frames: the last 5 frames of each segment
+        # are hard-copied to the start of the next segment (pixel-identical seam),
+        # then those 5 frames are trimmed here to prevent visual duplication.
+        overlap_frames=5,
         fps=15,
     )
 

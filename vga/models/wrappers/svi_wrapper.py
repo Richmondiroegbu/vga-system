@@ -15,7 +15,7 @@ Execution model
 S-09+ continuation: input_image + input_video TOGETHER → 36 channels
 ----------------------------------------------------------------------
   The DiT patch_embedding requires 36-channel input, assembled internally:
-    input_video (last N frames) → WanVideoUnit_InputVideoEmbedder → 16ch latents
+    input_video (last 5 frames) → WanVideoUnit_InputVideoEmbedder → 16ch latents
     input_image (last frame)    → WanVideoUnit_ImageEmbedderVAE   → 20ch (4 mask + 16 VAE)
     Total: 16 + 20 = 36ch ✓
 
@@ -23,6 +23,10 @@ S-09+ continuation: input_image + input_video TOGETHER → 36 channels
   "FIX" history: removing input_video, only input_image → 36ch but fresh I2V per
     segment → no temporal continuity (same scene, quality drift).
   CORRECT: both together with denoising_strength=0.75 → true SVI continuation.
+
+  POST-INFERENCE: first 5 output frames are hard-replaced with the exact source
+  frames (pixel-identical). Assembly trims these 5 frames at each join so the
+  hard-replaced frames are never visible in the final video.
 
 Speed improvements over the legacy approach
 -------------------------------------------
@@ -124,9 +128,10 @@ class SVIWrapper:
 
         infer_config = {
             "prev_segment_path": str(prev_segment_path),
-            # SVI continuation: 4 overlap frames from prev segment → video latents (16ch).
-            # These are also the frames trimmed during final assembly.
-            "num_overlap_frames": 4,
+            # SVI continuation: 5 overlap frames from prev segment → video latents (16ch).
+            # These frames are also hard-replaced post-inference for pixel-identical seams,
+            # then trimmed during final assembly.
+            "num_overlap_frames": 5,
             # 0.75 = start denoising at 75% of the noise schedule, preserving coarse
             # structure from overlap frames. 1.0 = full noise → ignores input_video.
             "denoising_strength": 0.75,

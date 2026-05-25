@@ -51,9 +51,11 @@ if SVI_REPO not in sys.path:
 
 WAN22_DIR = "/workspace/models/wan22"
 
-# Default overlap: 4 frames shared between consecutive segments.
-# Assembly trims the first 4 frames of each continuation segment.
-DEFAULT_OVERLAP_FRAMES = 4
+# Default overlap: 5 frames shared between consecutive segments.
+# Assembly trims the first 5 frames of each continuation segment.
+# These 5 frames are also hard-replaced post-inference with the exact
+# source frames for pixel-identical seams.
+DEFAULT_OVERLAP_FRAMES = 5
 
 
 def verify_and_configure_attention() -> bool:
@@ -376,6 +378,9 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Will be populated in S-09+ mode; used for hard frame replacement after inference.
+    overlap_frames_pil: list | None = None
+
     # Cinematic prompt — purely visual/descriptive, no character names (names cause
     # DiffSynth to render floating text rather than animate the character).
     full_prompt = (
@@ -424,8 +429,8 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
             # of the previous segment) is preserved coarsely. The model then
             # denoises all 81 output frames, continuing naturally from that
             # structure — this is the core SVI temporal continuation mechanism.
-            print(f"[S-09 SVI CONTINUATION] Extracting {num_overlap_frames} overlap frames "
-                  f"from {Path(prev_segment_path).name}...")
+            print(f"[S-09 SVI CONTINUATION] Extracting last {num_overlap_frames} frames "
+                  f"from {Path(prev_segment_path).name} for seam conditioning + hard replacement...")
             overlap_frames_pil = extract_last_n_frames_as_pil(
                 prev_segment_path, n=num_overlap_frames
             )
@@ -458,6 +463,23 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
                 video_frames = pipe(**call_kwargs)
         else:
             video_frames = pipe(**call_kwargs)
+
+        # ── HARD FRAME REPLACEMENT (S-09+ only) ──────────────────────────────
+        # The model's first `num_overlap_frames` output frames condition on the
+        # previous segment's tail but are NOT pixel-identical to it — the model
+        # still denoises them, producing slight drift. Hard-replacing them with
+        # the exact source frames guarantees a pixel-perfect seam regardless of
+        # what the model generated. Assembly then trims these frames so they are
+        # invisible in the final video; they exist only to provide continuity at
+        # the join point.
+        if overlap_frames_pil is not None and isinstance(video_frames, list):
+            n = min(num_overlap_frames, len(overlap_frames_pil), len(video_frames))
+            video_frames[:n] = overlap_frames_pil[:n]
+            print(f"  Hard-replaced first {n} frames with exact source frames "
+                  f"(pixel-identical seam, trimmed during assembly)")
+        elif overlap_frames_pil is not None:
+            print(f"  WARNING: video_frames type {type(video_frames)} — "
+                  f"skipping hard replacement; seam relies on model conditioning only")
 
         from diffsynth.utils.data import save_video
         save_video(video_frames, str(output_path), fps=15, quality=5)
