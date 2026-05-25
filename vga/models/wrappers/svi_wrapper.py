@@ -12,12 +12,17 @@ Execution model
   4. If the server fails to start or a request fails, SVIWrapper falls back to the
      legacy per-segment subprocess approach.
 
-S-09+ continuation mode: I2V from last frame (NOT V2V/input_video)
--------------------------------------------------------------------
-  Wan2.2-I2V patch_embedding requires 36-channel input. V2V mode (input_video)
-  only builds a 16-channel latent → channel mismatch crash. I2V from the last
-  frame of the previous segment (input_image) correctly builds 36 channels.
-  Assembly concatenates segments directly without overlap trimming.
+S-09+ continuation: input_image + input_video TOGETHER → 36 channels
+----------------------------------------------------------------------
+  The DiT patch_embedding requires 36-channel input, assembled internally:
+    input_video (last N frames) → WanVideoUnit_InputVideoEmbedder → 16ch latents
+    input_image (last frame)    → WanVideoUnit_ImageEmbedderVAE   → 20ch (4 mask + 16 VAE)
+    Total: 16 + 20 = 36ch ✓
+
+  CRASH history: passing only input_video (without input_image) → 16ch → crash.
+  "FIX" history: removing input_video, only input_image → 36ch but fresh I2V per
+    segment → no temporal continuity (same scene, quality drift).
+  CORRECT: both together with denoising_strength=0.75 → true SVI continuation.
 
 Speed improvements over the legacy approach
 -------------------------------------------
@@ -119,6 +124,12 @@ class SVIWrapper:
 
         infer_config = {
             "prev_segment_path": str(prev_segment_path),
+            # SVI continuation: 4 overlap frames from prev segment → video latents (16ch).
+            # These are also the frames trimmed during final assembly.
+            "num_overlap_frames": 4,
+            # 0.75 = start denoising at 75% of the noise schedule, preserving coarse
+            # structure from overlap frames. 1.0 = full noise → ignores input_video.
+            "denoising_strength": 0.75,
             # -1 = random seed per segment; fixed seed causes identical outputs across segments.
             "seed": -1,
             "prompt": prompt,

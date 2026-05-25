@@ -7,18 +7,28 @@ Two operation modes
 -------------------
   S-08 (Segment_1):  init_image_path provided → I2V from single character image.
 
-  S-09+ (Segments 2..N): prev_segment_path provided → I2V from last frame.
-    Extracts the LAST frame from the previous segment and passes it as
-    `input_image` to WanVideoSviPipeline (I2V mode, 36-channel input).
+  S-09+ (Segments 2..N): prev_segment_path provided → TRUE SVI CONTINUATION.
+    The pipeline requires 36-channel input to its patch_embedding:
+      - 16ch: video latents  (from input_video → WanVideoUnit_InputVideoEmbedder)
+      - 16ch: image VAE      (from input_image → WanVideoUnit_ImageEmbedderVAE)
+      -  4ch: temporal mask  (generated internally from input_image path)
+      ─────────────────────────────────────────────────────────────────────────
+      = 36ch total ✓
 
-    WHY NOT input_video (V2V mode):
-    Wan2.2-I2V patch_embedding expects 36-channel input (16 video latents +
-    16 image conditioning latents + 4 VACE mask channels). V2V mode (input_video)
-    only constructs a 16-channel latent → crashes with "expected 36 channels".
-    I2V mode (input_image) properly builds all 36 channels.
+    BOTH input_image AND input_video must be provided together:
+      input_image = last frame of prev segment  → supplies the 20ch `y` (mask+VAE)
+      input_video = last N frames of prev segment → supplies the 16ch video latents
+      denoising_strength = 0.75 → model starts 75% through the noise schedule,
+        preserving the coarse structure from the overlap frames while generating
+        new motion in the remaining 81-N frames.
 
-    No overlap trimming needed: each segment is a fresh generation starting
-    from the final frame of the previous segment. Assembly concatenates directly.
+    The first `num_overlap_frames` output frames closely replicate the end of
+    the previous segment. Assembly trims them to prevent visual duplication.
+
+    PREVIOUSLY BROKEN APPROACHES:
+      • Only input_video (no input_image): 16ch only → "expected 36 channels" crash
+      • Only input_image (no input_video): fresh I2V from a still frame each time
+        → each segment is identical regeneration, quality fades, no motion continuity
 
 Direct FP8 model loading: loads Wan2.2-I2V-A14B FP8 split-block format
 by reconstructing proper key prefixes, bypassing ModelScope/HuggingFace.
@@ -402,26 +412,35 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
             call_kwargs["input_image"] = ref_image
 
         else:
-            # ── S-09+ MODE: I2V from last frame of previous segment ──────────
-            # Wan2.2-I2V patch_embedding requires 36-channel input (16 video +
-            # 16 image conditioning + 4 VACE mask). input_video (V2V mode) only
-            # provides 16 channels → crashes with channel mismatch error.
-            # Correct approach: use input_image = last frame (I2V mode, 36-channel).
-            # Each continuation segment animates naturally from the final frame
-            # of the previous segment, producing visual continuity without trimming.
-            print(f"[S-09 I2V CONTINUATION] Extracting last frame "
+            # ── S-09+ MODE: TRUE SVI CONTINUATION ────────────────────────────
+            # The DiT patch_embedding requires 36-channel input, assembled by
+            # the pipeline from two sources:
+            #   input_image (last frame)  → y tensor: 4ch mask + 16ch VAE = 20ch
+            #   input_video (last N frames) → latents: 16ch video latents
+            #   Together: 20 + 16 = 36ch ✓
+            #
+            # denoising_strength=0.75: the scheduler adds noise only at 75% of
+            # its timestep budget, so input_video's structure (the last N frames
+            # of the previous segment) is preserved coarsely. The model then
+            # denoises all 81 output frames, continuing naturally from that
+            # structure — this is the core SVI temporal continuation mechanism.
+            print(f"[S-09 SVI CONTINUATION] Extracting {num_overlap_frames} overlap frames "
                   f"from {Path(prev_segment_path).name}...")
             overlap_frames_pil = extract_last_n_frames_as_pil(
-                prev_segment_path, n=1
+                prev_segment_path, n=num_overlap_frames
             )
             if not overlap_frames_pil:
                 return {
                     "status": "error",
-                    "error": f"Failed to extract last frame from {prev_segment_path}",
+                    "error": f"Failed to extract overlap frames from {prev_segment_path}",
                 }
-            last_frame = overlap_frames_pil[0]
-            call_kwargs["input_image"] = last_frame
-            print(f"  Conditioning on last frame as input_image (I2V mode, 36-channel)")
+            last_frame = overlap_frames_pil[-1]  # last frame → image conditioning (y)
+            call_kwargs["input_image"] = last_frame          # 20ch: mask + VAE encoding
+            call_kwargs["input_video"] = overlap_frames_pil  # 16ch: video latents
+            call_kwargs["denoising_strength"] = denoising_strength_continuation
+            print(f"  input_image: last frame (image conditioning, 20ch)")
+            print(f"  input_video: {len(overlap_frames_pil)} overlap frames (video latents, 16ch)")
+            print(f"  36ch total = 16 + 20 ✓  denoising_strength={denoising_strength_continuation}")
 
         print(f"Running SVI inference: cfg={cfg:.2f} steps={steps} seed={seed_val} → {output_path.name}")
 

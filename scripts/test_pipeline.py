@@ -301,7 +301,10 @@ def main():
         segment_paths=[out_s08["segment_1"].file_path]
         + ([seg.file_path for seg in out_s09["segments"]] if out_s09 else []),
         output_path="/workspace/output/test_e2e_001/scene_001/scene_001_final.mp4",
-        overlap_frames=0,  # I2V mode: each segment starts fresh from prev last frame, no trimming needed
+        # SVI continuation passes 4 overlap frames as input_video conditioning.
+        # The first 4 frames of each continuation segment replicate the end of
+        # the previous segment — trim them to prevent visual duplication.
+        overlap_frames=4,
         fps=15,
     )
 
