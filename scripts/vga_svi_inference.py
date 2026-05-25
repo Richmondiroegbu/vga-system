@@ -7,19 +7,18 @@ Two operation modes
 -------------------
   S-08 (Segment_1):  init_image_path provided → I2V from single character image.
 
-  S-09+ (Segments 2..N): prev_segment_path provided → TRUE SVI CONTINUATION.
-    Extracts the last `num_overlap_frames` (default 4) frames from the previous
-    segment and passes them as `input_video` to WanVideoSviPipeline.
-    This gives the model MULTI-FRAME temporal context so each new segment
-    continues naturally from where the previous ended.
+  S-09+ (Segments 2..N): prev_segment_path provided → I2V from last frame.
+    Extracts the LAST frame from the previous segment and passes it as
+    `input_image` to WanVideoSviPipeline (I2V mode, 36-channel input).
 
-    WRONG (old): extract 1 frame → input_image  (= fresh I2V, no motion context)
-    RIGHT:       extract N frames → input_video  (= SVI temporal continuation)
+    WHY NOT input_video (V2V mode):
+    Wan2.2-I2V patch_embedding expects 36-channel input (16 video latents +
+    16 image conditioning latents + 4 VACE mask channels). V2V mode (input_video)
+    only constructs a 16-channel latent → crashes with "expected 36 channels".
+    I2V mode (input_image) properly builds all 36 channels.
 
-    The first `num_overlap_frames` of each continuation segment will closely
-    match the last `num_overlap_frames` of the previous segment, providing
-    the seamless join. The caller (test_pipeline.py / AssemblyAgent) must
-    trim those overlap frames when concatenating segments into the final video.
+    No overlap trimming needed: each segment is a fresh generation starting
+    from the final frame of the previous segment. Assembly concatenates directly.
 
 Direct FP8 model loading: loads Wan2.2-I2V-A14B FP8 split-block format
 by reconstructing proper key prefixes, bypassing ModelScope/HuggingFace.
@@ -403,30 +402,26 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
             call_kwargs["input_image"] = ref_image
 
         else:
-            # ── S-09+ MODE: TRUE SVI CONTINUATION via input_video ───────────
-            # Extract last N frames of previous segment as PIL Images.
-            # These become the conditioning context for the new segment.
-            # The first N frames of the output will naturally continue from
-            # those conditioning frames → seamless temporal join.
-            print(f"[S-09 CONTINUATION] Extracting {num_overlap_frames} overlap frames "
+            # ── S-09+ MODE: I2V from last frame of previous segment ──────────
+            # Wan2.2-I2V patch_embedding requires 36-channel input (16 video +
+            # 16 image conditioning + 4 VACE mask). input_video (V2V mode) only
+            # provides 16 channels → crashes with channel mismatch error.
+            # Correct approach: use input_image = last frame (I2V mode, 36-channel).
+            # Each continuation segment animates naturally from the final frame
+            # of the previous segment, producing visual continuity without trimming.
+            print(f"[S-09 I2V CONTINUATION] Extracting last frame "
                   f"from {Path(prev_segment_path).name}...")
             overlap_frames_pil = extract_last_n_frames_as_pil(
-                prev_segment_path, n=num_overlap_frames
+                prev_segment_path, n=1
             )
             if not overlap_frames_pil:
                 return {
                     "status": "error",
-                    "error": f"Failed to extract overlap frames from {prev_segment_path}",
+                    "error": f"Failed to extract last frame from {prev_segment_path}",
                 }
-            # Pass as input_video — the SVI pipeline uses these for temporal continuity.
-            # Do NOT set input_image for continuation (that would reset to I2V mode).
-            # denoising_strength<1.0 is CRITICAL: at 1.0 (default) the pipeline adds full
-            # noise and ignores input_video entirely. At 0.75, it preserves the coarse
-            # latent structure from the overlap frames, producing true seamless continuation.
-            call_kwargs["input_video"] = overlap_frames_pil
-            call_kwargs["denoising_strength"] = denoising_strength_continuation
-            print(f"  Conditioning on {len(overlap_frames_pil)} overlap frames (input_video, "
-                  f"denoising_strength={denoising_strength_continuation})")
+            last_frame = overlap_frames_pil[0]
+            call_kwargs["input_image"] = last_frame
+            print(f"  Conditioning on last frame as input_image (I2V mode, 36-channel)")
 
         print(f"Running SVI inference: cfg={cfg:.2f} steps={steps} seed={seed_val} → {output_path.name}")
 

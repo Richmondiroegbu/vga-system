@@ -12,6 +12,13 @@ Execution model
   4. If the server fails to start or a request fails, SVIWrapper falls back to the
      legacy per-segment subprocess approach.
 
+S-09+ continuation mode: I2V from last frame (NOT V2V/input_video)
+-------------------------------------------------------------------
+  Wan2.2-I2V patch_embedding requires 36-channel input. V2V mode (input_video)
+  only builds a 16-channel latent → channel mismatch crash. I2V from the last
+  frame of the previous segment (input_image) correctly builds 36 channels.
+  Assembly concatenates segments directly without overlap trimming.
+
 Speed improvements over the legacy approach
 -------------------------------------------
   - Persistent server:   eliminates ~3-5 min cold load per segment
@@ -112,12 +119,6 @@ class SVIWrapper:
 
         infer_config = {
             "prev_segment_path": str(prev_segment_path),
-            # 4-frame overlap: last 4 frames of prev segment condition next segment's first 4.
-            # Caller must trim first 4 frames of continuation segments when assembling final video.
-            "num_overlap_frames": 4,
-            # 0.75 = ~75% noise schedule; preserves coarse latent structure from overlap frames.
-            # 1.0 (pipeline default) = full noise, ignores input_video entirely → disjointed segments.
-            "denoising_strength": 0.75,
             # -1 = random seed per segment; fixed seed causes identical outputs across segments.
             "seed": -1,
             "prompt": prompt,
