@@ -142,6 +142,46 @@ def extract_last_n_frames_as_pil(video_path: str, n: int) -> list:
     return frames
 
 
+def normalize_frame_sequence_exposure(
+    frames: list,
+    target_mean: float = 130.0,
+    max_scale: float = 1.40,
+    min_scale: float = 0.80,
+) -> list:
+    """Normalize a segment's output frames to a consistent mean brightness.
+
+    Prevents compounding brightness drift across autoregressive SVI segments.
+    Applied to the ENTIRE 81-frame sequence (including overlap frames) before
+    saving to disk, so the next segment reads bright conditioning frames.
+
+    Per-sequence (not per-frame) scaling preserves relative intra-segment
+    lighting variation while resetting the absolute exposure level.
+    """
+    import numpy as np
+    from PIL import Image as _Image
+
+    if not frames:
+        return frames
+
+    arrs = [np.array(f, dtype=np.float32) for f in frames]
+    seq_mean = float(np.mean([a.mean() for a in arrs]))
+
+    if seq_mean < 5.0:
+        print(f"  Exposure normalization: sequence too dark ({seq_mean:.1f}), skipping")
+        return frames
+
+    scale = float(np.clip(target_mean / seq_mean, min_scale, max_scale))
+    print(f"  Exposure normalization: seq_mean={seq_mean:.1f} → target={target_mean:.0f} scale={scale:.3f}")
+
+    if abs(scale - 1.0) < 0.02:
+        return frames  # within ±2% — no correction needed
+
+    return [
+        _Image.fromarray(np.clip(arr * scale, 0, 255).astype(np.uint8))
+        for arr in arrs
+    ]
+
+
 def load_fp8_state_dict(fp8_dir: str) -> dict:
     """Load Wan2.2 FP8 split-block model, reconstructing proper key prefixes."""
     from safetensors import safe_open
@@ -355,11 +395,11 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
     prev_segment_path = config.get("prev_segment_path", "")
     init_image_path = config.get("init_image_path", "")
     prompt = config.get("prompt", "cinematic scene, photorealistic")
-    cfg = float(config.get("cfg", 5.5))
+    cfg = float(config.get("cfg", 6.0))
     steps = int(config.get("steps", 12))
     camera_motion = config.get("camera_motion", "static")
     motion_vector = config.get("motion_vector", "stationary")
-    tea_cache_thresh = float(config.get("tea_cache_l1_thresh", 0.1))
+    tea_cache_thresh = 0.0  # Wan2.2 has no calibrated TeaCache rescale coefficients; Wan2.1 coefficients cause gray output
     num_overlap_frames = int(config.get("num_overlap_frames", DEFAULT_OVERLAP_FRAMES))
     # denoising_strength for continuation mode (S-09+):
     #   1.0 = full noise, ignores input_video entirely (WRONG — fresh generation each segment)
@@ -389,15 +429,21 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
 
     # Cinematic prompt — purely visual/descriptive, no character names (names cause
     # DiffSynth to render floating text rather than animate the character).
+    # "temporal consistency" removed from positive prompt: it encourages frozen/static
+    # frames. Motion language added explicitly to drive character and scene dynamics.
     full_prompt = (
         f"{prompt}, {camera_motion}, motion: {motion_vector}, "
-        "cinematic quality, photorealistic, temporal consistency"
+        "natural human movement, expressive gestures, dynamic body language, "
+        "vivid colors, high contrast, sharp detail, cinematic quality, photorealistic"
     )
+    # Added anti-static and anti-dim terms to reinforce motion and exposure quality.
     negative_prompt = (
         "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，"
         "最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，"
         "画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，"
-        "杂乱的背景，三条腿，背景人很多，倒着走"
+        "杂乱的背景，三条腿，背景人很多，倒着走，"
+        "frozen pose, no movement, static character, dim lighting, underexposed, "
+        "dark frame, hazy, foggy, low visibility, washed out, faded"
     )
 
     try:
@@ -415,12 +461,39 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
         )
 
         if init_image_path and Path(init_image_path).exists():
-            # ── S-08 MODE: I2V from single character image ──────────────────
-            # The init_image is the refined character portrait from S-07.
-            # DiffSynth animates this image into 81 frames.
-            print(f"[S-08 I2V] Using init image: {Path(init_image_path).name}")
+            # ── S-08 MODE: Bootstrap via 5-frame PIL zoom-in seed → S-09 continuation ──
+            # Still image (repeated 4×) provides no temporal motion signal → model
+            # generates static content that fades to gray over 81 frames.
+            # Solution: create a 5-frame zoom-in (0%→6%, PIL only, no model), save
+            # as seed.mp4, then call run_inference() recursively in S-09 mode.
+            # S-09 gets real motion dynamics from the zoom and produces vivid output.
+            print(f"[S-08 BOOTSTRAP] Init image: {Path(init_image_path).name}")
             ref_image = Image.open(init_image_path).convert("RGB").resize((832, 480), Image.LANCZOS)
-            call_kwargs["input_image"] = ref_image
+
+            # 0%→6% zoom gives the model a clear forward-motion signal strong enough
+            # to propagate dynamic movement across all 81 generated frames.
+            # 0→2% was too subtle — model treated it as near-static and generated stasis.
+            print("[S-08] Generating 5-frame zoom-in seed (0%→6% zoom, PIL only)...")
+            seed_frames_pil = []
+            for _i in range(5):
+                _zoom = 1.0 + _i * 0.015
+                _nw, _nh = int(832 * _zoom), int(480 * _zoom)
+                _enl = ref_image.resize((_nw, _nh), Image.LANCZOS)
+                _left, _top = (_nw - 832) // 2, (_nh - 480) // 2
+                seed_frames_pil.append(_enl.crop((_left, _top, _left + 832, _top + 480)))
+
+            from diffsynth.utils.data import save_video as _sv_seed
+            _seed_path = output_path.parent / f"_s08_seed_{output_path.stem}.mp4"
+            _sv_seed(seed_frames_pil, str(_seed_path), fps=15, quality=5)
+            print(f"[S-08] Seed saved: {_seed_path.name} — 5 vivid zoom frames → S-09 input")
+
+            _s09_config = dict(config)
+            _s09_config["prev_segment_path"] = str(_seed_path)
+            _s09_config.pop("init_image_path", None)
+            _result = run_inference(pipe, _s09_config)
+            if _seed_path.exists():
+                _seed_path.unlink()
+            return _result
 
         else:
             # ── S-09+ MODE: TRUE SVI CONTINUATION ────────────────────────────
@@ -492,6 +565,18 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
         elif overlap_frames_pil is not None:
             print(f"  WARNING: video_frames type {type(video_frames)} — "
                   f"skipping hard replacement; seam relies on model conditioning only")
+
+        # ── EXPOSURE NORMALIZATION (applied AFTER hard replacement) ───────────
+        # Normalizes the full 81-frame sequence to a consistent mean brightness
+        # BEFORE writing to disk. This means when the next segment reads this
+        # file for conditioning, it extracts bright (normalized) overlap frames
+        # rather than the raw dim tail — preventing compounding brightness drift
+        # across the 4 autoregressive segments.
+        # Applied after hard replacement so the overlap frames (0-4, trimmed by
+        # assembly) are also normalized; their brightness is visible to the next
+        # segment's conditioning extractor.
+        if isinstance(video_frames, list):
+            video_frames = normalize_frame_sequence_exposure(video_frames, target_mean=130.0)
 
         from diffsynth.utils.data import save_video
         save_video(video_frames, str(output_path), fps=15, quality=5)
