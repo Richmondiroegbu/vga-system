@@ -89,6 +89,7 @@ class SVIWrapper:
         output_path: str | Path,
         scene_id: str,
         segment_id: int,
+        ref_image_path: str | Path = "",  # original S-07 refined image for random_ref_frame injection
     ) -> str:
         """Invoke SVI Pro 2 to generate one video segment.
 
@@ -149,6 +150,10 @@ class SVIWrapper:
             # TeaCache: 0.1 is a safe threshold (~2-3× speedup, minimal quality loss).
             # Set to 0.0 to disable if you observe visual artefacts.
             "tea_cache_l1_thresh": float(os.environ.get("SVI_TEA_CACHE_THRESH", "0.1")),
+            # ref_image_path: original S-07 refined character image. When set, the
+            # inference bridge injects it as random_ref_frame with ref_pad_num=-1,
+            # anchoring cross-attention to the original character in every segment.
+            "ref_image_path": str(ref_image_path) if ref_image_path else "",
         }
 
         # ── Path 1: persistent server (avoids cold model loading per segment) ──

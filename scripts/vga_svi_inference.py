@@ -142,43 +142,71 @@ def extract_last_n_frames_as_pil(video_path: str, n: int) -> list:
     return frames
 
 
-def normalize_frame_sequence_exposure(
+def enhance_frame_sequence_contrast(
     frames: list,
+    clahe_clip_limit: float = 2.0,
+    clahe_tile_size: int = 8,
     target_mean: float = 130.0,
-    max_scale: float = 1.40,
+    max_scale: float = 1.35,
     min_scale: float = 0.80,
 ) -> list:
-    """Normalize a segment's output frames to a consistent mean brightness.
+    """CLAHE + global mean normalization to counteract FP8 local contrast collapse.
 
-    Prevents compounding brightness drift across autoregressive SVI segments.
-    Applied to the ENTIRE 81-frame sequence (including overlap frames) before
-    saving to disk, so the next segment reads bright conditioning frames.
+    FP8 DiT weights introduce per-step quantization errors that cause variance
+    collapse in the luminance channel — pixels cluster toward the mean, producing
+    progressive fog/haze even when the global mean is correct. Global mean
+    normalization alone cannot fix this because variance is already lost.
 
-    Per-sequence (not per-frame) scaling preserves relative intra-segment
-    lighting variation while resetting the absolute exposure level.
+    Two-stage fix:
+      1. CLAHE in LAB color space: redistributes luminance locally, restoring
+         fine detail and contrast within each tile. clipLimit=2.0 prevents
+         over-amplification of noise; tileGridSize=(8,8) matches natural scene
+         structure at 832×480.
+      2. Global mean normalization: anchors the sequence-level brightness to
+         target_mean=130 so the next segment reads bright conditioning frames
+         (prevents the cross-segment brightness cascade from compounding).
+
+    Per-sequence scaling (not per-frame) preserves intra-segment lighting
+    variation while resetting the absolute exposure level.
     """
+    import cv2
     import numpy as np
     from PIL import Image as _Image
 
     if not frames:
         return frames
 
-    arrs = [np.array(f, dtype=np.float32) for f in frames]
-    seq_mean = float(np.mean([a.mean() for a in arrs]))
+    # Stage 1: CLAHE in LAB color space — restores local contrast
+    clahe = cv2.createCLAHE(
+        clipLimit=clahe_clip_limit,
+        tileGridSize=(clahe_tile_size, clahe_tile_size),
+    )
+    enhanced_arrs = []
+    for frame in frames:
+        arr = np.array(frame)
+        lab = cv2.cvtColor(arr, cv2.COLOR_RGB2LAB)
+        l_ch, a_ch, b_ch = cv2.split(lab)
+        l_enhanced = clahe.apply(l_ch)
+        lab_enhanced = cv2.merge([l_enhanced, a_ch, b_ch])
+        enhanced_arrs.append(cv2.cvtColor(lab_enhanced, cv2.COLOR_LAB2RGB))
+
+    # Stage 2: global mean normalization — prevents brightness drift across segments
+    float_arrs = [a.astype(np.float32) for a in enhanced_arrs]
+    seq_mean = float(np.mean([a.mean() for a in float_arrs]))
 
     if seq_mean < 5.0:
-        print(f"  Exposure normalization: sequence too dark ({seq_mean:.1f}), skipping")
-        return frames
+        print(f"  Contrast enhancement: CLAHE applied, sequence too dark ({seq_mean:.1f}), skipping scale")
+        return [_Image.fromarray(a) for a in enhanced_arrs]
 
     scale = float(np.clip(target_mean / seq_mean, min_scale, max_scale))
-    print(f"  Exposure normalization: seq_mean={seq_mean:.1f} → target={target_mean:.0f} scale={scale:.3f}")
+    print(f"  Contrast enhancement: CLAHE applied, seq_mean={seq_mean:.1f} → target={target_mean:.0f} scale={scale:.3f}")
 
     if abs(scale - 1.0) < 0.02:
-        return frames  # within ±2% — no correction needed
+        return [_Image.fromarray(a) for a in enhanced_arrs]
 
     return [
-        _Image.fromarray(np.clip(arr * scale, 0, 255).astype(np.uint8))
-        for arr in arrs
+        _Image.fromarray(np.clip(a * scale, 0, 255).astype(np.uint8))
+        for a in float_arrs
     ]
 
 
@@ -395,7 +423,7 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
     prev_segment_path = config.get("prev_segment_path", "")
     init_image_path = config.get("init_image_path", "")
     prompt = config.get("prompt", "cinematic scene, photorealistic")
-    cfg = float(config.get("cfg", 6.0))
+    cfg = float(config.get("cfg", 7.0))
     steps = int(config.get("steps", 12))
     camera_motion = config.get("camera_motion", "static")
     motion_vector = config.get("motion_vector", "stationary")
@@ -406,6 +434,12 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
     #   0.75 = moderate noise, preserves structure from overlap frames (CORRECT — true continuation)
     # S-08 I2V mode always uses 1.0 (we want full generation from the still image).
     denoising_strength_continuation = float(config.get("denoising_strength", 0.75))
+    # ref_image_path: optional path to original reference image (S-07 refined portrait).
+    # When provided, injected into every S-09 segment's cross-attention as random_ref_frame
+    # (ref_pad_num=-1 = anchor present throughout the full segment attention window).
+    # Prevents progressive scene drift by keeping the original character reference visible
+    # to the model even in deep continuation segments.
+    ref_image_path = config.get("ref_image_path", "")
 
     # Seed: -1 or absent → random (important for continuation segments to vary)
     seed_val = config.get("seed", -1)
@@ -458,6 +492,14 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
             num_inference_steps=steps,
             tiled=False,
             seed=seed_val,
+            # sigma_shift=5.0: official recommended value for Wan2.2 + SVI.
+            # Controls the noise schedule shift — lower values preserve motion/dynamics,
+            # higher values favor static detail. 5.0 is the vita-epfl default for svi_wan22.
+            sigma_shift=5.0,
+            # num_motion_latent=1: official SVI v2 Pro setting for Wan2.2.
+            # Passes the last 4 pixel frames' latent state (1 temporal latent = 4 frames
+            # at VAE stride=4). Values above 1 produce artifacts with v2 Pro LoRAs.
+            num_motion_latent=1,
         )
 
         if init_image_path and Path(init_image_path).exists():
@@ -490,6 +532,11 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
             _s09_config = dict(config)
             _s09_config["prev_segment_path"] = str(_seed_path)
             _s09_config.pop("init_image_path", None)
+            # Preserve the original reference image so subsequent S-09 segments can
+            # inject it as random_ref_frame, anchoring cross-attention to the original
+            # character throughout all continuation segments.
+            if "ref_image_path" not in _s09_config or not _s09_config["ref_image_path"]:
+                _s09_config["ref_image_path"] = init_image_path
             _result = run_inference(pipe, _s09_config)
             if _seed_path.exists():
                 _seed_path.unlink()
@@ -531,6 +578,20 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
             print(f"  input_video: {len(conditioning_frames)} conditioning frames (VAE constraint, 16ch)")
             print(f"  hard replace: first {len(overlap_frames_pil)} output frames ← exact source frames")
             print(f"  36ch total = 16 + 20 ✓  denoising_strength={denoising_strength_continuation}")
+
+            # Inject original reference image into every S-09 segment's cross-attention.
+            # random_ref_frame with ref_pad_num=-1 keeps the original character anchor
+            # visible throughout the entire segment's attention window — prevents the
+            # progressive scene drift caused by each segment conditioning only on the
+            # (increasingly FP8-degraded) tail of its predecessor.
+            if ref_image_path and Path(ref_image_path).exists():
+                try:
+                    _ref_img = Image.open(ref_image_path).convert("RGB").resize((832, 480), Image.LANCZOS)
+                    call_kwargs["random_ref_frame"] = _ref_img
+                    call_kwargs["ref_pad_num"] = -1
+                    print(f"  random_ref_frame: {Path(ref_image_path).name} injected (ref_pad_num=-1, anchors all attention)")
+                except Exception as _e:
+                    print(f"  random_ref_frame: failed to load {ref_image_path}: {_e} — skipping")
 
         print(f"Running SVI inference: cfg={cfg:.2f} steps={steps} seed={seed_val} → {output_path.name}")
 
@@ -576,7 +637,7 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
         # assembly) are also normalized; their brightness is visible to the next
         # segment's conditioning extractor.
         if isinstance(video_frames, list):
-            video_frames = normalize_frame_sequence_exposure(video_frames, target_mean=130.0)
+            video_frames = enhance_frame_sequence_contrast(video_frames, target_mean=130.0)
 
         from diffsynth.utils.data import save_video
         save_video(video_frames, str(output_path), fps=15, quality=5)

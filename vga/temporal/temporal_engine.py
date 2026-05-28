@@ -236,6 +236,10 @@ class TemporalEngine:
         svi = SVIWrapper()
         lora_schedule = scheduler.build_lora_schedule()
 
+        # Pass the original reference image so each segment re-injects it as
+        # random_ref_frame in cross-attention, preventing progressive scene drift.
+        ref_image_path = getattr(context.identity_state, "ref_image_path", "")
+
         svi.generate_segment(
             init_latents_path=str(prev_segment_path),
             prompt=prompt,
@@ -249,6 +253,7 @@ class TemporalEngine:
             output_path=output_path,
             scene_id=context.scene_id,
             segment_id=segment_number,
+            ref_image_path=ref_image_path,
         )
 
         # === Step 3: Validate triple (CLIP + continuity + buffer) ===

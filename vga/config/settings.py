@@ -93,8 +93,8 @@ class VGASettings(BaseSettings):
 
     # === SVI CFG + Steps (FR-936, FR-937) ===
     SVI_CFG_MIN: float = 5.0
-    SVI_CFG_MAX: float = 6.0
-    SVI_CFG_DEFAULT: float = 5.5
+    SVI_CFG_MAX: float = 8.0   # raised from 6.0; vita-epfl recommends 7.0 for non-distill SVI
+    SVI_CFG_DEFAULT: float = 7.0
     STEPS_CRITICAL: int = 50     # production quality (increase when ready)
     STEPS_STANDARD: int = 30    # production quality (was 12 for dev; 30 is minimum for non-gray output)
 
