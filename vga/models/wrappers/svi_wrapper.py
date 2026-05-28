@@ -220,7 +220,10 @@ class SVIWrapper:
             "--lora-path-low", str(settings.SVI_LOW_NOISE_PATH),
         ]
         env = os.environ.copy()
-        env["SVI_GPU_RESIDENT"] = "0"          # CPU-offload required on 32GB VRAM pods
+        # Inherit SVI_GPU_RESIDENT from env (set in .env_vga per pod VRAM capacity).
+        # A6000 48GB: SVI_GPU_RESIDENT=1 keeps both FP8 DiTs (~28GB) on GPU.
+        # RTX 5090 32GB: SVI_GPU_RESIDENT=0 (CPU-offload required; 34GB > 32GB VRAM).
+        env.setdefault("SVI_GPU_RESIDENT", os.environ.get("SVI_GPU_RESIDENT", "0"))
         env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
         try:
             subprocess.Popen(

@@ -12,6 +12,12 @@ import sys
 import time
 import logging
 
+# Load pod environment (SVI_GPU_RESIDENT, HF tokens, etc.) before any imports.
+_env_vga = "/workspace/.env_vga"
+if os.path.exists(_env_vga):
+    from dotenv import load_dotenv
+    load_dotenv(_env_vga, override=False)  # don't override already-set vars
+
 os.environ["HRG_REVIEW_ENABLED"] = "false"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["PYTHONPATH"] = "/workspace"
