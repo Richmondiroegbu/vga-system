@@ -435,8 +435,8 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
     # S-08 I2V mode always uses 1.0 (we want full generation from the still image).
     denoising_strength_continuation = float(config.get("denoising_strength", 0.75))
     # ref_image_path: optional path to original reference image (S-07 refined portrait).
-    # When provided, injected into every S-09 segment's cross-attention as random_ref_frame
-    # (ref_pad_num=-1 = anchor present throughout the full segment attention window).
+    # When provided, passed as `anchor` to WanVideoSviPipeline.__call__().
+    # Keeps original character visible in all attention layers of every S-09 segment.
     # Prevents progressive scene drift by keeping the original character reference visible
     # to the model even in deep continuation segments.
     ref_image_path = config.get("ref_image_path", "")
@@ -496,11 +496,9 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
             # Controls the noise schedule shift — lower values preserve motion/dynamics,
             # higher values favor static detail. 5.0 is the vita-epfl default for svi_wan22.
             sigma_shift=5.0,
-            # num_motion_latent=1: official SVI v2 Pro setting for Wan2.2.
-            # Passes the last 4 pixel frames' latent state (1 temporal latent = 4 frames
-            # at VAE stride=4). Values above 1 produce artifacts with v2 Pro LoRAs.
-            num_motion_latent=1,
         )
+        # num_motion_latent is an __init__ param of SviPipeline wrapper, NOT a __call__ param.
+        # WanVideoSviPipeline.__call__ does not accept it — it was removed to fix TypeError.
 
         if init_image_path and Path(init_image_path).exists():
             # ── S-08 MODE: Bootstrap via 5-frame PIL zoom-in seed → S-09 continuation ──
@@ -579,19 +577,18 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
             print(f"  hard replace: first {len(overlap_frames_pil)} output frames ← exact source frames")
             print(f"  36ch total = 16 + 20 ✓  denoising_strength={denoising_strength_continuation}")
 
-            # Inject original reference image into every S-09 segment's cross-attention.
-            # random_ref_frame with ref_pad_num=-1 keeps the original character anchor
-            # visible throughout the entire segment's attention window — prevents the
-            # progressive scene drift caused by each segment conditioning only on the
-            # (increasingly FP8-degraded) tail of its predecessor.
+            # Inject original reference image as anchor into every S-09 segment.
+            # WanVideoSviPipeline.__call__ uses `anchor` (not `random_ref_frame`).
+            # The anchor is preprocessed into a padded latent sequence, keeping the
+            # original character visible in all attention layers — prevents progressive
+            # scene drift caused by each segment conditioning only on its degraded predecessor.
             if ref_image_path and Path(ref_image_path).exists():
                 try:
                     _ref_img = Image.open(ref_image_path).convert("RGB").resize((832, 480), Image.LANCZOS)
-                    call_kwargs["random_ref_frame"] = _ref_img
-                    call_kwargs["ref_pad_num"] = -1
-                    print(f"  random_ref_frame: {Path(ref_image_path).name} injected (ref_pad_num=-1, anchors all attention)")
+                    call_kwargs["anchor"] = _ref_img
+                    print(f"  anchor: {Path(ref_image_path).name} injected (character anchor for all attention layers)")
                 except Exception as _e:
-                    print(f"  random_ref_frame: failed to load {ref_image_path}: {_e} — skipping")
+                    print(f"  anchor: failed to load {ref_image_path}: {_e} — skipping")
 
         print(f"Running SVI inference: cfg={cfg:.2f} steps={steps} seed={seed_val} → {output_path.name}")
 
