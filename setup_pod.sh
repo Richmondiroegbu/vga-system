@@ -20,7 +20,7 @@ pip install --break-system-packages -q git+https://github.com/huggingface/diffus
     tokenizers sentencepiece
 pip install --break-system-packages -q "pydantic>=2.7,<3" pydantic-settings fastapi uvicorn python-dotenv bitsandbytes
 pip install --break-system-packages -q safetensors "huggingface-hub>=0.24" hf-transfer imageio imageio-ffmpeg
-pip install --break-system-packages -q opencv-python-headless Pillow numpy scipy
+pip install --break-system-packages -q opencv-python-headless Pillow numpy scipy open_clip_torch
 
 # Clone DiffSynth svi_wan22 (only if not already present)
 if [ ! -d /workspace/Stable-Video-Infinity ]; then

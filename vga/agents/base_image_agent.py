@@ -11,6 +11,7 @@ from typing import List, Tuple
 
 from vga.agents.base_agent import BaseAgent
 from vga.config.settings import settings
+from vga.core.exceptions import CLIPValidationError
 from vga.models.schemas import IdentityDesignSchema
 from vga.models.wrappers.flux_wrapper import FluxWrapper
 from vga.state.immutable_context import IdentityState, ImmutableContext
