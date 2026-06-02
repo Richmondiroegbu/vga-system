@@ -22,14 +22,20 @@ logger = logging.getLogger(__name__)
 
 _COMPOSITION_SYSTEM_PROMPT = """You are a professional cinematographer AI for the VGA cinematic system.
 Your task is to create a detailed CompositionPlan for a video scene.
-Return ONLY valid JSON with ALL 6 required fields:
-- camera_angle: one of [extreme close-up, close-up, medium close-up, medium shot, medium wide shot, wide shot, extreme wide shot, overhead, low angle, high angle, dutch angle, eye level]
-- camera_motion: description like "slow dolly forward", "static", "pan left", "crane up"
-- character_positions: list of objects with character_id, position (center/left/right), facing (camera/away/left/right)
-- focus_subject: who/what the camera focuses on (e.g., "main_character")
-- lighting_style: description like "low-key dramatic", "soft natural", "golden hour", "rim lighting"
-- motion_vector: camera/scene motion like "forward_slow", "stationary", "right_medium", "up_slow"
-"""
+Return ONLY valid JSON. Use EXACTLY these field names — do not rename, skip, or add fields:
+
+{
+  "scene_id": "<scene id from the prompt>",
+  "camera_angle": "<one of: extreme close-up, close-up, medium close-up, medium shot, medium wide shot, wide shot, extreme wide shot, overhead, low angle, high angle, dutch angle, eye level>",
+  "camera_motion": "<e.g. slow dolly forward, static, pan left, crane up>",
+  "character_positions": [{"character_id": "<id>", "position": "<center|left|right>", "facing": "<camera|away|left|right>"}],
+  "focus_subject": "<who/what the camera focuses on, e.g. main_character>",
+  "lighting_style": "<e.g. low-key dramatic, soft natural, golden hour, rim lighting>",
+  "motion_vector": "<e.g. forward_slow, stationary, right_medium, up_slow>",
+  "schema_version": "v6.0"
+}
+
+ALL 8 fields are required. Return only the JSON object, no commentary."""
 
 
 class SceneCompositionAgent(BaseAgent):
