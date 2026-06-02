@@ -16,7 +16,7 @@ mkdir -p /workspace/{output,logs,hrg,models,loras,auxiliary,cache/huggingface}
 # Install Python packages
 # torch 2.8.0+cu128 is pre-installed on this pod — skip it
 # --break-system-packages required on Ubuntu 24.04 (PEP 668 externally-managed-environment)
-pip install --break-system-packages -q diffusers==0.32.2 transformers==4.51.3 accelerate==1.6.0 \
+pip install --break-system-packages -q git+https://github.com/huggingface/diffusers.git transformers==4.51.3 accelerate==1.6.0 \
     tokenizers sentencepiece
 pip install --break-system-packages -q "pydantic>=2.7,<3" pydantic-settings fastapi uvicorn python-dotenv bitsandbytes
 pip install --break-system-packages -q safetensors "huggingface-hub>=0.24" hf-transfer imageio imageio-ffmpeg
