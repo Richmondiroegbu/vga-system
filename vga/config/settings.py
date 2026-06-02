@@ -105,6 +105,15 @@ class VGASettings(BaseSettings):
     HIGH_NOISE_FRACTION: float = 0.67
     MID_NOISE_FRACTION: float = 0.33
 
+    # === Camera Angle Transition (multi-reference I2V) ===
+    # Strategy A (hard cut): model gets maximum freedom to adopt new viewpoint.
+    TRANSITION_HARD_CUT_DS: float = 0.90
+    # Strategy C (pixel-space blend): softer — old motion partially guides model.
+    TRANSITION_BLEND_DS: float = 0.80
+    # Max blend alpha on the final conditioning frame (cosine ramp 0→this value).
+    # Research confirms safe range is ≤ 0.30 for semantically similar source/dest.
+    TRANSITION_BLEND_MAX_ALPHA: float = 0.25
+
     # === Motion ===
     MOTION_STATIONARY_THRESHOLD: float = 0.02
 

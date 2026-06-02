@@ -89,7 +89,9 @@ class SVIWrapper:
         output_path: str | Path,
         scene_id: str,
         segment_id: int,
-        ref_image_path: str | Path = "",  # original S-07 refined image for random_ref_frame injection
+        ref_image_path: str | Path = "",  # original S-07 refined image for anchor injection
+        transition_mode: str = "none",    # "none" | "hard_cut" | "blend"
+        new_angle_ref_image: str = "",    # path to new angle reference (for hard_cut / blend)
     ) -> str:
         """Invoke SVI Pro 2 to generate one video segment.
 
@@ -133,9 +135,9 @@ class SVIWrapper:
             # These frames are also hard-replaced post-inference for pixel-identical seams,
             # then trimmed during final assembly.
             "num_overlap_frames": 5,
-            # 0.75 = start denoising at 75% of the noise schedule, preserving coarse
-            # structure from overlap frames. 1.0 = full noise → ignores input_video.
-            "denoising_strength": 0.75,
+            # 0.60 = standard continuation — tight adherence to overlap frames (less face warping).
+            # Overridden to 0.90 (hard_cut) or 0.80 (blend) for transition segments.
+            "denoising_strength": 0.60,
             # -1 = random seed per segment; fixed seed causes identical outputs across segments.
             "seed": -1,
             "prompt": prompt,
@@ -151,9 +153,18 @@ class SVIWrapper:
             # Set to 0.0 to disable if you observe visual artefacts.
             "tea_cache_l1_thresh": float(os.environ.get("SVI_TEA_CACHE_THRESH", "0.1")),
             # ref_image_path: original S-07 refined character image. When set, the
-            # inference bridge injects it as random_ref_frame with ref_pad_num=-1,
-            # anchoring cross-attention to the original character in every segment.
+            # inference bridge injects it as anchor, anchoring cross-attention to the
+            # original character in every segment and preventing progressive scene drift.
             "ref_image_path": str(ref_image_path) if ref_image_path else "",
+            # transition_mode: controls camera angle switching behaviour for this segment.
+            #   "none"      — normal continuation (default)
+            #   "hard_cut"  — Strategy A: switch input_image to new angle ref, ds=0.90
+            #   "blend"     — Strategy C: cosine-ramp pixel blend of conditioning frames, ds=0.80
+            "transition_mode": transition_mode,
+            # new_angle_ref_image: path to the new camera angle reference image.
+            # Only used when transition_mode is "hard_cut" or "blend".
+            # This becomes the new input_image (and optionally anchor) for this segment.
+            "new_angle_ref_image": new_angle_ref_image,
         }
 
         # ── Path 1: persistent server (avoids cold model loading per segment) ──

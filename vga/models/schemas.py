@@ -19,6 +19,50 @@ VALID_CAMERA_ANGLES = {
 }
 
 
+class CameraAngleGroup(BaseModel):
+    """One group of segments sharing the same camera angle reference image.
+
+    Used to implement multi-reference I2V: different reference images drive
+    different segment ranges, enabling motivated camera angle changes mid-video.
+
+    Example:
+        angle_groups = [
+            CameraAngleGroup(image_path="angle1_front.jpg", camera_angle="medium shot",
+                             segments=[1, 2], transition_mode="none"),
+            CameraAngleGroup(image_path="angle2_side.jpg", camera_angle="medium wide shot",
+                             segments=[3, 4], transition_mode="blend"),
+            CameraAngleGroup(image_path="angle3_closeup.jpg", camera_angle="close-up",
+                             segments=[5, 6], transition_mode="hard_cut"),
+        ]
+
+    transition_mode: how to transition INTO this group from the previous group.
+        "none"      — first group; no transition needed.
+        "hard_cut"  — Strategy A: switch reference + raise denoising_strength to 0.90.
+        "blend"     — Strategy C: pixel-space cosine blend of conditioning frames (α 0→0.25).
+    """
+
+    image_path: str
+    camera_angle: str
+    segments: List[int]       # 1-indexed segment numbers belonging to this group
+    transition_mode: str = "none"    # TransitionMode value
+    schema_version: str = "v6.0"
+
+    @field_validator("segments")
+    @classmethod
+    def validate_segments_nonempty(cls, v: List[int]) -> List[int]:
+        if not v:
+            raise ValueError("CameraAngleGroup.segments must not be empty")
+        return v
+
+    @field_validator("transition_mode")
+    @classmethod
+    def validate_transition_mode(cls, v: str) -> str:
+        valid = {"none", "hard_cut", "blend"}
+        if v not in valid:
+            raise ValueError(f"transition_mode {v!r} must be one of {valid}")
+        return v
+
+
 class CompositionPlanSchema(BaseModel):
     """Mandatory output of SceneCompositionAgent (S-04). RULE-88. schema_version v6.0."""
 
@@ -29,6 +73,7 @@ class CompositionPlanSchema(BaseModel):
     focus_subject: str       # "main_character"
     lighting_style: str      # "low-key dramatic", "soft natural", etc.
     motion_vector: str       # "forward_slow", "stationary", "right_medium", etc.
+    angle_groups: Optional[List[CameraAngleGroup]] = None  # multi-reference I2V groups
     schema_version: str = "v6.0"
 
     @field_validator("camera_angle")

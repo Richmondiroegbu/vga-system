@@ -93,3 +93,23 @@ class AudioChannel(str, Enum):
     DIALOGUE = "dialogue"    # 0 dB — highest priority
     AMBIENT = "ambient"      # −12 dB
     MUSIC = "music"          # −18 dB
+
+
+class TransitionMode(str, Enum):
+    """Camera angle transition strategy at segment group boundaries (multi-reference I2V).
+
+    NONE      — normal continuation, no angle change.
+    HARD_CUT  — Strategy A: switch input_image + anchor to new angle reference;
+                raise denoising_strength to 0.90 so the model ignores old motion
+                vectors and re-generates mostly from the new reference. Sharp editorial
+                cut style — 10-20 frame pose-reconciliation, then stable new angle.
+    BLEND     — Strategy C: pixel-space cosine-ramp blend of the last 4 conditioning
+                frames toward the new angle reference (α 0→0.25 over 4 frames);
+                hard-switch input_image to new angle; raise denoising_strength to
+                0.80. Produces a gradual 10-20 frame cross-dissolve transition.
+                Suitable for motivated scene reveals or camera pans.
+    """
+
+    NONE = "none"
+    HARD_CUT = "hard_cut"
+    BLEND = "blend"

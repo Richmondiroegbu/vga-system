@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import random
 import sys
@@ -594,6 +595,69 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
             # We extract num_overlap_frames (5) for hard replacement but only pass
             # the last _MAX_INPUT_VIDEO_FRAMES (4) to the pipeline for conditioning.
             conditioning_frames = overlap_frames_pil[-_MAX_INPUT_VIDEO_FRAMES:]
+
+            # ── CAMERA ANGLE TRANSITION (multi-reference I2V) ──────────────────
+            # transition_mode:
+            #   "none"     — normal continuation (default)
+            #   "hard_cut" — Strategy A: switch input_image to new angle ref, ds=0.90.
+            #                Model gets maximum freedom to adopt the new viewpoint.
+            #                Sharp editorial cut style. Best for action cuts.
+            #   "blend"    — Strategy C: pixel-space cosine-ramp blend of the last 4
+            #                conditioning frames toward new angle ref (α 0→0.25).
+            #                Soft cross-dissolve over 10-20 frames. Best for motivated
+            #                scene changes (character turns, reveals).
+            # In both modes: input_image hard-switches to new angle reference;
+            # anchor stays as original S-07 character ref (identity lock).
+            transition_mode = config.get("transition_mode", "none")
+            new_angle_ref_path = config.get("new_angle_ref_image", "")
+
+            if transition_mode in ("hard_cut", "blend") and new_angle_ref_path and Path(new_angle_ref_path).exists():
+                new_ref_img = Image.open(new_angle_ref_path).convert("RGB").resize((832, 480), Image.LANCZOS)
+
+                if transition_mode == "blend":
+                    # Strategy C: cosine-ramp pixel blend of conditioning frames.
+                    # Cosine ramp stays low longer than linear — more old-angle motion
+                    # signal in early frames, gentle rise toward new angle at frame 4.
+                    # α_i = max_alpha * (1 - cos(π * i / n)) / 2
+                    # At n=4: frame 0 → 0.0, frame 1 → 0.037, frame 2 → 0.125, frame 3 → 0.25
+                    max_alpha = float(config.get("transition_blend_max_alpha", 0.25))
+                    n_cond = len(conditioning_frames)
+                    blended_conditioning = []
+                    for i, old_f in enumerate(conditioning_frames):
+                        alpha = max_alpha * (1.0 - math.cos(math.pi * i / n_cond)) / 2.0
+                        blended_conditioning.append(Image.blend(old_f, new_ref_img, alpha))
+                    conditioning_frames = blended_conditioning
+                    denoising_strength_continuation = float(
+                        config.get("transition_ds", 0.80)
+                    )
+                    print(
+                        f"  [STRATEGY-C BLEND] Cosine-ramp blend conditioning frames "
+                        f"(max_alpha={max_alpha:.2f}, n={n_cond}), "
+                        f"ds={denoising_strength_continuation}"
+                    )
+                else:
+                    # Strategy A: hard cut — only switch input_image; keep raw
+                    # conditioning frames so the model has residual motion context,
+                    # but elevated ds=0.90 largely overrides that context anyway.
+                    denoising_strength_continuation = float(
+                        config.get("transition_ds", 0.90)
+                    )
+                    print(
+                        f"  [STRATEGY-A HARD CUT] New angle ref: {Path(new_angle_ref_path).name}, "
+                        f"ds={denoising_strength_continuation}"
+                    )
+
+                # Both strategies: switch input_image to new angle reference.
+                # anchor (ref_image_path) stays as original S-07 portrait for identity lock.
+                last_frame = new_ref_img
+                print(f"  input_image switched to new angle: {Path(new_angle_ref_path).name}")
+
+            elif transition_mode != "none":
+                print(
+                    f"  WARNING: transition_mode={transition_mode!r} but new_angle_ref_image "
+                    f"not found ({new_angle_ref_path!r}) — falling back to normal continuation"
+                )
+
             call_kwargs["input_image"] = last_frame           # 20ch: mask + VAE encoding
             call_kwargs["input_video"] = conditioning_frames  # 16ch: video latents (max 4)
             call_kwargs["denoising_strength"] = denoising_strength_continuation
