@@ -96,7 +96,7 @@ class VGASettings(BaseSettings):
     SVI_CFG_MAX: float = 8.0   # raised from 6.0; vita-epfl recommends 7.0 for non-distill SVI
     SVI_CFG_DEFAULT: float = 7.0
     STEPS_CRITICAL: int = 50     # production quality (increase when ready)
-    STEPS_STANDARD: int = 30    # production quality (was 12 for dev; 30 is minimum for non-gray output)
+    STEPS_STANDARD: int = 50    # raised from 30 — sharper SVI output, eliminates softness vs seed frame
 
     # === SVI LoRA Scheduling (FR-932–FR-934) ===
     LORA_WEIGHT_HIGH_NOISE: float = 0.6          # t > HIGH_NOISE_FRACTION * T
