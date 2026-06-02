@@ -57,3 +57,24 @@ Any deviation from a RULE-XX or FR-XXX constraint MUST be documented here with:
 **Description:** Initial implementation combined all 3 sub-stages inside `image_edit_agent.py`. Corrected by implementing all three as separate files per spec. `image_edit_agent.py` retained as the coordinator but the sub-agents now exist as individual files.
 **Reason:** Implementation oversight. Now corrected — all three separate agent files created on 2026-05-15.
 **Approval:** APPROVED by operator on 2026-05-15 (corrected)
+
+---
+
+## DEV-005 — 2026-06-02 — SVI CFG range extended to [5.0, 8.0]
+
+**Files:** `vga/config/settings.py`, `vga/models/schemas.py`
+**Rule violated:** MASTER_PROMPT_INDEX.md §Settings — specifies `SVI_CFG_MIN=5.0`, `SVI_CFG_MAX=6.0`, `SVI_CFG_DEFAULT=5.5`
+**Description:** `SVI_CFG_MAX` raised from 6.0 to 8.0; `SVI_CFG_DEFAULT` raised from 5.5 to 7.0. `SVIGenerationRecord.validate_cfg` updated to use `settings.SVI_CFG_MIN/MAX` instead of hardcoded [5.0, 6.0]. `SVIScheduler._validate_cfg` unchanged — it still references settings and thus accepts the extended range.
+**Reason:** vita-epfl (SVI authors) recommend CFG 7.0 for Wan2.2 non-distill models. During testing on RTX PRO 6000 Blackwell, the hardcoded [5.0, 6.0] range caused a ValidationError crash in `SVIGenerationRecord` after the inference completed with cfg=7.0, because the schema still enforced the old spec range. Extended range matches the actual operating range used in production inference.
+**Approval:** APPROVED by operator on 2026-06-02
+
+---
+
+## DEV-006 — 2026-06-02 — STEPS_STANDARD raised to 50
+
+**File:** `vga/config/settings.py`
+**Rule violated:** MASTER_PROMPT_INDEX.md §Settings — specifies `STEPS_STANDARD=30` for standard segments
+**Description:** `STEPS_STANDARD` raised from 30 to 50, matching `STEPS_CRITICAL`. Both standard and critical segments now use 50 steps.
+**Reason:** SVI output at 30 steps exhibited visible softness/cloudiness at the 1-second mark vs the seed frame. Testing at 50 steps produces significantly sharper output. Step time is 12.4s/step on RTX PRO 6000 Blackwell; 50 steps = ~10 min/segment, which is within acceptable production bounds for a 95GB VRAM pod.
+**Approval:** APPROVED by operator on 2026-06-02
+
