@@ -18,9 +18,9 @@ Two operation modes
     BOTH input_image AND input_video must be provided together:
       input_image = last frame of prev segment  → supplies the 20ch `y` (mask+VAE)
       input_video = last N frames of prev segment → supplies the 16ch video latents
-      denoising_strength = 0.75 → model starts 75% through the noise schedule,
-        preserving the coarse structure from the overlap frames while generating
-        new motion in the remaining 81-N frames.
+      denoising_strength = 0.60 → model starts 60% through the noise schedule,
+        preserving coarse structure more tightly (reduces face warping vs 0.75)
+        while still allowing new motion in the remaining 81-N frames.
 
     The first `num_overlap_frames` output frames closely replicate the end of
     the previous segment. Assembly trims them to prevent visual duplication.
@@ -147,27 +147,28 @@ def enhance_frame_sequence_contrast(
     clahe_clip_limit: float = 2.0,
     clahe_tile_size: int = 8,
     target_mean: float = 130.0,
+    target_saturation: float = 90.0,   # HSV S-channel mean target (0-255 scale)
     max_scale: float = 1.35,
     min_scale: float = 0.80,
+    max_sat_scale: float = 2.0,        # clamp: never more than 2× saturation boost
 ) -> list:
-    """CLAHE + global mean normalization to counteract FP8 local contrast collapse.
+    """CLAHE + saturation restoration + global mean normalization.
 
-    FP8 DiT weights introduce per-step quantization errors that cause variance
-    collapse in the luminance channel — pixels cluster toward the mean, producing
-    progressive fog/haze even when the global mean is correct. Global mean
-    normalization alone cannot fix this because variance is already lost.
+    FP8 DiT weights cause two cascading failure modes:
+      1. Luminance collapse: pixels cluster toward mean → fog/haze (fixed by CLAHE)
+      2. Saturation collapse: chroma drains toward grey across segments → sepia →
+         greyscale. CLAHE operates on L channel only and does NOT restore saturation.
+         Without explicit saturation correction the 5-frame overlap passed to the next
+         segment carries the desaturation forward, compounding each segment.
 
-    Two-stage fix:
-      1. CLAHE in LAB color space: redistributes luminance locally, restoring
-         fine detail and contrast within each tile. clipLimit=2.0 prevents
-         over-amplification of noise; tileGridSize=(8,8) matches natural scene
-         structure at 832×480.
-      2. Global mean normalization: anchors the sequence-level brightness to
-         target_mean=130 so the next segment reads bright conditioning frames
-         (prevents the cross-segment brightness cascade from compounding).
+    Three-stage fix:
+      1. CLAHE in LAB L-channel: restores local contrast, preserves hue/saturation.
+      2. HSV saturation restoration: rescales S channel so the sequence mean reaches
+         target_saturation (~90), breaking the cross-segment desaturation cascade.
+      3. Global mean normalization: anchors brightness to target_mean=130.
 
-    Per-sequence scaling (not per-frame) preserves intra-segment lighting
-    variation while resetting the absolute exposure level.
+    Per-sequence scaling (stages 2 and 3) preserves intra-segment variation while
+    resetting both exposure and saturation for the next segment's conditioning frames.
     """
     import cv2
     import numpy as np
@@ -190,19 +191,40 @@ def enhance_frame_sequence_contrast(
         lab_enhanced = cv2.merge([l_enhanced, a_ch, b_ch])
         enhanced_arrs.append(cv2.cvtColor(lab_enhanced, cv2.COLOR_LAB2RGB))
 
-    # Stage 2: global mean normalization — prevents brightness drift across segments
-    float_arrs = [a.astype(np.float32) for a in enhanced_arrs]
+    # Stage 2: HSV saturation restoration — breaks the cross-segment desaturation cascade.
+    # FP8 quantization drains chroma: segment tails are sepia/grey, poisoning next segment's
+    # conditioning. Re-saturate before saving so conditioning frames look vivid.
+    hsv_arrs = [cv2.cvtColor(a, cv2.COLOR_RGB2HSV).astype(np.float32) for a in enhanced_arrs]
+    sat_mean = float(np.mean([a[:, :, 1].mean() for a in hsv_arrs]))
+    if sat_mean > 5.0:  # skip if already near-greyscale source
+        sat_scale = float(np.clip(target_saturation / max(sat_mean, 1.0), 1.0, max_sat_scale))
+        if sat_scale > 1.02:
+            sat_restored = []
+            for hsv in hsv_arrs:
+                hsv_c = hsv.copy()
+                hsv_c[:, :, 1] = np.clip(hsv_c[:, :, 1] * sat_scale, 0, 255)
+                sat_restored.append(cv2.cvtColor(hsv_c.astype(np.uint8), cv2.COLOR_HSV2RGB))
+            print(f"  Saturation: sat_mean={sat_mean:.1f} → target={target_saturation:.0f} scale={sat_scale:.3f}")
+        else:
+            sat_restored = enhanced_arrs
+            print(f"  Saturation: sat_mean={sat_mean:.1f} already adequate, no boost")
+    else:
+        sat_restored = enhanced_arrs
+        print(f"  Saturation: sat_mean={sat_mean:.1f} near-grey source, skipping boost")
+
+    # Stage 3: global mean normalization — prevents brightness drift across segments
+    float_arrs = [a.astype(np.float32) for a in sat_restored]
     seq_mean = float(np.mean([a.mean() for a in float_arrs]))
 
     if seq_mean < 5.0:
-        print(f"  Contrast enhancement: CLAHE applied, sequence too dark ({seq_mean:.1f}), skipping scale")
-        return [_Image.fromarray(a) for a in enhanced_arrs]
+        print(f"  Brightness: CLAHE applied, sequence too dark ({seq_mean:.1f}), skipping scale")
+        return [_Image.fromarray(a) for a in sat_restored]
 
     scale = float(np.clip(target_mean / seq_mean, min_scale, max_scale))
-    print(f"  Contrast enhancement: CLAHE applied, seq_mean={seq_mean:.1f} → target={target_mean:.0f} scale={scale:.3f}")
+    print(f"  Brightness: seq_mean={seq_mean:.1f} → target={target_mean:.0f} scale={scale:.3f}")
 
     if abs(scale - 1.0) < 0.02:
-        return [_Image.fromarray(a) for a in enhanced_arrs]
+        return [_Image.fromarray(np.clip(a, 0, 255).astype(np.uint8)) for a in float_arrs]
 
     return [
         _Image.fromarray(np.clip(a * scale, 0, 255).astype(np.uint8))
@@ -431,9 +453,10 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
     num_overlap_frames = int(config.get("num_overlap_frames", DEFAULT_OVERLAP_FRAMES))
     # denoising_strength for continuation mode (S-09+):
     #   1.0 = full noise, ignores input_video entirely (WRONG — fresh generation each segment)
-    #   0.75 = moderate noise, preserves structure from overlap frames (CORRECT — true continuation)
+    #   0.75 = moderate noise, preserves structure but allows heavy face reconstruction → warping
+    #   0.60 = lower noise, tighter adherence to overlap frames → sharper faces, less warping
     # S-08 I2V mode always uses 1.0 (we want full generation from the still image).
-    denoising_strength_continuation = float(config.get("denoising_strength", 0.75))
+    denoising_strength_continuation = float(config.get("denoising_strength", 0.60))
     # ref_image_path: optional path to original reference image (S-07 refined portrait).
     # When provided, passed as `anchor` to WanVideoSviPipeline.__call__().
     # Keeps original character visible in all attention layers of every S-09 segment.
@@ -477,7 +500,9 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
         "画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，"
         "杂乱的背景，三条腿，背景人很多，倒着走，"
         "frozen pose, no movement, static character, dim lighting, underexposed, "
-        "dark frame, hazy, foggy, low visibility, washed out, faded"
+        "dark frame, hazy, foggy, low visibility, washed out, faded, "
+        "desaturated, sepia tone, sepia filter, grayscale, black and white, monochrome, "
+        "color faded, dull colors, muted colors, color drained"
     )
 
     try:
