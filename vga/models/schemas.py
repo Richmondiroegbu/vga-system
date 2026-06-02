@@ -143,8 +143,11 @@ class SVIGenerationRecord(BaseModel):
     @field_validator("cfg")
     @classmethod
     def validate_cfg(cls, v: float) -> float:
-        if not (5.0 <= v <= 6.0):
-            raise ValueError(f"SVI CFG {v} outside allowed range [5.0, 6.0]")
+        from vga.config.settings import settings
+        if not (settings.SVI_CFG_MIN <= v <= settings.SVI_CFG_MAX):
+            raise ValueError(
+                f"SVI CFG {v} outside allowed range [{settings.SVI_CFG_MIN}, {settings.SVI_CFG_MAX}]"
+            )
         return v
 
 
