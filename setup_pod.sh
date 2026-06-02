@@ -15,11 +15,12 @@ mkdir -p /workspace/{output,logs,hrg,models,loras,auxiliary,cache/huggingface}
 
 # Install Python packages
 # torch 2.8.0+cu128 is pre-installed on this pod — skip it
-pip install -q diffusers==0.32.2 transformers==4.51.3 accelerate==1.6.0 \
+# --break-system-packages required on Ubuntu 24.04 (PEP 668 externally-managed-environment)
+pip install --break-system-packages -q diffusers==0.32.2 transformers==4.51.3 accelerate==1.6.0 \
     tokenizers sentencepiece
-pip install -q "pydantic>=2.7,<3" pydantic-settings fastapi uvicorn python-dotenv
-pip install -q safetensors "huggingface-hub>=0.24" hf-transfer imageio imageio-ffmpeg
-pip install -q opencv-python-headless Pillow numpy scipy
+pip install --break-system-packages -q "pydantic>=2.7,<3" pydantic-settings fastapi uvicorn python-dotenv
+pip install --break-system-packages -q safetensors "huggingface-hub>=0.24" hf-transfer imageio imageio-ffmpeg
+pip install --break-system-packages -q opencv-python-headless Pillow numpy scipy
 
 # Clone DiffSynth svi_wan22 (only if not already present)
 if [ ! -d /workspace/Stable-Video-Infinity ]; then
@@ -28,7 +29,7 @@ if [ ! -d /workspace/Stable-Video-Infinity ]; then
         https://github.com/vita-epfl/Stable-Video-Infinity.git \
         /workspace/Stable-Video-Infinity
 fi
-pip install -q -e /workspace/Stable-Video-Infinity
+pip install --break-system-packages -q -e /workspace/Stable-Video-Infinity
 
 echo "=== Verifying installs ==="
 python3 -c "
