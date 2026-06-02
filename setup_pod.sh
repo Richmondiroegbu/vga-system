@@ -18,7 +18,7 @@ mkdir -p /workspace/{output,logs,hrg,models,loras,auxiliary,cache/huggingface}
 # --break-system-packages required on Ubuntu 24.04 (PEP 668 externally-managed-environment)
 pip install --break-system-packages -q diffusers==0.32.2 transformers==4.51.3 accelerate==1.6.0 \
     tokenizers sentencepiece
-pip install --break-system-packages -q "pydantic>=2.7,<3" pydantic-settings fastapi uvicorn python-dotenv
+pip install --break-system-packages -q "pydantic>=2.7,<3" pydantic-settings fastapi uvicorn python-dotenv bitsandbytes
 pip install --break-system-packages -q safetensors "huggingface-hub>=0.24" hf-transfer imageio imageio-ffmpeg
 pip install --break-system-packages -q opencv-python-headless Pillow numpy scipy
 
