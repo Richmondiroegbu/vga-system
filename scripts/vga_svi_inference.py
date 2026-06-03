@@ -112,11 +112,17 @@ def extract_last_frame(video_path: str, output_image_path: str) -> bool:
         return False
 
 
-def extract_last_n_frames_as_pil(video_path: str, n: int) -> list:
+def extract_last_n_frames_as_pil(video_path: str, n: int, skip_last: int = 0) -> list:
     """Extract the last n frames from a video and return as list of PIL Images.
 
     Used for SVI continuation mode (input_video parameter).
     Each returned image is resized to 832×480 (Wan2.2 inference resolution).
+
+    skip_last (WanCutLastSlot): exclude this many frames from the tail before
+    counting back n frames. When the previous segment was generated with FLF2V
+    end_frame conditioning, its last ~4 frames are locked to the end frame and
+    provide no motion signal — using them as SVI input_video causes seam artifacts.
+    Value is settings.FLF2V_WANCUT_SLOT_FRAMES (4) when applicable, else 0.
     """
     from PIL import Image
     frames = []
@@ -127,17 +133,23 @@ def extract_last_n_frames_as_pil(video_path: str, n: int) -> list:
         if total == 0:
             print(f"ERROR: {video_path} has 0 frames")
             return frames
-        start = max(0, total - n)
+        # WanCutLastSlot: treat video as ending skip_last frames earlier
+        effective_end = max(1, total - skip_last)
+        start = max(0, effective_end - n)
         cap.set(cv2.CAP_PROP_POS_FRAMES, start)
-        while True:
+        frames_to_read = effective_end - start
+        frames_read = 0
+        while frames_read < frames_to_read:
             ret, frame = cap.read()
             if not ret:
                 break
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             pil_img = Image.fromarray(rgb).resize((832, 480), Image.LANCZOS)
             frames.append(pil_img)
+            frames_read += 1
         cap.release()
-        print(f"  Extracted {len(frames)} overlap frames from {Path(video_path).name}")
+        skip_note = f" (WanCutLastSlot: skipped tail {skip_last}f)" if skip_last else ""
+        print(f"  Extracted {len(frames)} overlap frames from {Path(video_path).name}{skip_note}")
     except Exception as e:
         print(f"ERROR extracting frames as PIL: {e}")
     return frames
@@ -579,10 +591,15 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
             # of the previous segment) is preserved coarsely. The model then
             # denoises all 81 output frames, continuing naturally from that
             # structure — this is the core SVI temporal continuation mechanism.
+
+            # WanCutLastSlot: if previous segment was generated with FLF2V end_frame,
+            # skip its frozen tail (locked to end frame, not a real motion signal).
+            wancut_skip = int(config.get("wancut_skip_last", 0))
+
             print(f"[S-09 SVI CONTINUATION] Extracting last {num_overlap_frames} frames "
                   f"from {Path(prev_segment_path).name} for seam conditioning + hard replacement...")
             overlap_frames_pil = extract_last_n_frames_as_pil(
-                prev_segment_path, n=num_overlap_frames
+                prev_segment_path, n=num_overlap_frames, skip_last=wancut_skip
             )
             if not overlap_frames_pil:
                 return {
@@ -679,22 +696,59 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
                 except Exception as _e:
                     print(f"  anchor: failed to load {ref_image_path}: {_e} — skipping")
 
-        print(f"Running SVI inference: cfg={cfg:.2f} steps={steps} seed={seed_val} → {output_path.name}")
+            # FLF2V (Phase 1): inject end_image as endpoint constraint.
+            # The model is conditioned to arrive at this frame by the segment's final frame,
+            # preventing static output and enabling planned narrative endpoints.
+            # Phase 1: passed as end_image kwarg — WanVideoSviPipeline forwards it to
+            # DiffSynth WanVideoPipeline if supported. Graceful fallback on TypeError.
+            end_image_path = config.get("end_image_path", "")
+            if end_image_path and Path(end_image_path).exists():
+                try:
+                    _end_img = Image.open(end_image_path).convert("RGB").resize((832, 480), Image.LANCZOS)
+                    call_kwargs["end_image"] = _end_img
+                    print(f"  [FLF2V] end_image: {Path(end_image_path).name} — model constrained to reach this frame")
+                except Exception as _e:
+                    print(f"  [FLF2V] end_image: failed to load {end_image_path}: {_e} — skipping")
+            elif end_image_path:
+                print(f"  [FLF2V] WARNING: end_image_path set but not found: {end_image_path}")
 
-        tea_model_id = "Wan2.1-I2V-14B-480P"
-        if tea_cache_thresh > 0.0:
-            try:
-                video_frames = pipe(
-                    tea_cache_l1_thresh=tea_cache_thresh,
-                    tea_cache_model_id=tea_model_id,
-                    **call_kwargs,
+        flf2v_active = "end_image" in call_kwargs
+        print(
+            f"Running SVI inference: cfg={cfg:.2f} steps={steps} seed={seed_val}"
+            f"{' [FLF2V]' if flf2v_active else ''} → {output_path.name}"
+        )
+
+        def _run_pipe(**kwargs) -> list:
+            """Run pipeline; strip end_image and retry if pipeline doesn't support it."""
+            tea_model_id = "Wan2.1-I2V-14B-480P"
+            if tea_cache_thresh > 0.0:
+                try:
+                    frames = pipe(
+                        tea_cache_l1_thresh=tea_cache_thresh,
+                        tea_cache_model_id=tea_model_id,
+                        **kwargs,
+                    )
+                    print(f"  TeaCache enabled (thresh={tea_cache_thresh}, id={tea_model_id}) — ~2-3x speedup")
+                    return frames
+                except (TypeError, ValueError):
+                    print("  TeaCache: not supported by this pipeline build, running standard inference")
+                    return pipe(**kwargs)
+            return pipe(**kwargs)
+
+        try:
+            video_frames = _run_pipe(**call_kwargs)
+        except TypeError as _te:
+            if "end_image" in call_kwargs and "end_image" in str(_te):
+                # WanVideoSviPipeline does not support end_image kwarg yet.
+                # Fall back to standard continuation without FLF2V endpoint constraint.
+                print(
+                    f"  [FLF2V] WARNING: pipeline rejected end_image ({_te}) — "
+                    f"falling back to standard continuation (no endpoint constraint)"
                 )
-                print(f"  TeaCache enabled (thresh={tea_cache_thresh}, id={tea_model_id}) — ~2-3x speedup")
-            except (TypeError, ValueError):
-                print("  TeaCache: not supported by this pipeline build, running standard inference")
-                video_frames = pipe(**call_kwargs)
-        else:
-            video_frames = pipe(**call_kwargs)
+                call_kwargs.pop("end_image")
+                video_frames = _run_pipe(**call_kwargs)
+            else:
+                raise
 
         # ── HARD FRAME REPLACEMENT (S-09+ only) ──────────────────────────────
         # The model's first `num_overlap_frames` output frames condition on the

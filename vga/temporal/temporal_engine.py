@@ -146,6 +146,10 @@ class TemporalEngine:
         cfg = settings.SVI_CFG_DEFAULT
         steps = settings.STEPS_STANDARD
 
+        # FLF2V state: track whether previous segment used an end_frame so we can
+        # apply WanCutLastSlot (skip frozen tail) when extracting overlap conditioning.
+        prev_had_end_frame: bool = False
+
         # RULE-107: EXPLICIT per-segment for loop — NEVER batch
         for n, plan in enumerate(segment_plans, start=2):
             logger.info(
@@ -164,6 +168,23 @@ class TemporalEngine:
                     n, transition_mode, new_angle_ref_image,
                 )
 
+            # FLF2V: extract end_frame_path from segment plan (set by EndFrameGenerator / S-07c)
+            end_image_path: str = getattr(plan, "end_frame_path", "") or ""
+            if end_image_path and settings.FLF2V_ENABLED:
+                logger.info(
+                    "TemporalEngine: segment %d — FLF2V end_frame: %s",
+                    n, Path(end_image_path).name,
+                )
+            elif end_image_path and not settings.FLF2V_ENABLED:
+                logger.debug(
+                    "TemporalEngine: segment %d — end_frame_path set but FLF2V_ENABLED=False, skipping",
+                    n,
+                )
+                end_image_path = ""
+
+            # WanCutLastSlot: skip frozen tail of previous segment if it used FLF2V
+            wancut_skip_last: int = settings.FLF2V_WANCUT_SLOT_FRAMES if prev_had_end_frame else 0
+
             segment, buffer, context = self._generate_single_segment_with_retry(
                 segment_number=n,
                 plan=plan,
@@ -174,7 +195,12 @@ class TemporalEngine:
                 output_dir=output_dir,
                 transition_mode=transition_mode,
                 new_angle_ref_image=new_angle_ref_image,
+                end_image_path=end_image_path,
+                wancut_skip_last=wancut_skip_last,
             )
+
+            # Update FLF2V state for next iteration
+            prev_had_end_frame = bool(end_image_path)
 
             # === RULE-86: assert buffer AFTER ===
             self._buffer_manager._assert_buffer_size(buffer)
@@ -206,6 +232,8 @@ class TemporalEngine:
         output_dir: Path,
         transition_mode: str = "none",
         new_angle_ref_image: str = "",
+        end_image_path: str = "",
+        wancut_skip_last: int = 0,
     ) -> tuple[VideoSegmentArtifact, TemporalBuffer, ImmutableContext]:
         """Generate a single segment with up to max_retries retry attempts."""
         last_error: Exception | None = None
@@ -228,6 +256,8 @@ class TemporalEngine:
                     output_dir=output_dir,
                     transition_mode=transition_mode,
                     new_angle_ref_image=new_angle_ref_image,
+                    end_image_path=end_image_path,
+                    wancut_skip_last=wancut_skip_last,
                 )
                 return segment, new_buffer, new_context
             except (CLIPValidationError, TemporalBufferError) as exc:
@@ -254,6 +284,8 @@ class TemporalEngine:
         output_dir: Path,
         transition_mode: str = "none",
         new_angle_ref_image: str = "",
+        end_image_path: str = "",
+        wancut_skip_last: int = 0,
     ) -> tuple[VideoSegmentArtifact, TemporalBuffer, ImmutableContext]:
         """Execute one SVI generation iteration of the autoregressive loop.
 
@@ -293,6 +325,8 @@ class TemporalEngine:
             ref_image_path=ref_image_path,
             transition_mode=transition_mode,
             new_angle_ref_image=new_angle_ref_image,
+            end_image_path=end_image_path,
+            wancut_skip_last=wancut_skip_last,
         )
 
         # === Step 3: Validate triple (CLIP + continuity + buffer) ===

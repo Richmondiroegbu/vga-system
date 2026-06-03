@@ -92,6 +92,8 @@ class SVIWrapper:
         ref_image_path: str | Path = "",  # original S-07 refined image for anchor injection
         transition_mode: str = "none",    # "none" | "hard_cut" | "blend"
         new_angle_ref_image: str = "",    # path to new angle reference (for hard_cut / blend)
+        end_image_path: str | Path = "",  # FLF2V: endpoint frame — model constrained to arrive here
+        wancut_skip_last: int = 0,        # WanCutLastSlot: frames to skip from prev segment tail
     ) -> str:
         """Invoke SVI Pro 2 to generate one video segment.
 
@@ -165,6 +167,17 @@ class SVIWrapper:
             # Only used when transition_mode is "hard_cut" or "blend".
             # This becomes the new input_image (and optionally anchor) for this segment.
             "new_angle_ref_image": new_angle_ref_image,
+            # FLF2V: end_image_path — when set, the inference bridge injects this frame
+            # as an endpoint constraint, forcing the model to arrive at this visual state.
+            # Phase 1: passed as end_image kwarg to WanVideoSviPipeline (graceful fallback
+            # if unsupported). Phase 2 upgrade: concat_mask injection (no new weights).
+            "end_image_path": str(end_image_path) if end_image_path else "",
+            # WanCutLastSlot: skip this many frames from the tail of the previous segment
+            # when extracting overlap conditioning frames. Use when the previous segment
+            # was generated with an end_frame (its tail is locked/frozen to that end frame
+            # and creates motion-steering conflicts at the seam if used as SVI input_video).
+            # Value: settings.FLF2V_WANCUT_SLOT_FRAMES (4) when prev had end_frame, else 0.
+            "wancut_skip_last": wancut_skip_last,
         }
 
         # ── Path 1: persistent server (avoids cold model loading per segment) ──

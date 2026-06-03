@@ -114,6 +114,19 @@ class VGASettings(BaseSettings):
     # Research confirms safe range is ≤ 0.30 for semantically similar source/dest.
     TRANSITION_BLEND_MAX_ALPHA: float = 0.25
 
+    # === FLF2V — First-Last Frame to Video (Phase 1: concat_mask on existing weights) ===
+    # Conditions segment generation on a pre-chosen end frame, constraining the model
+    # to arrive at a target visual state. Solves static character and narrative drift.
+    # Phase 1: injects end_image via WanVideoSviPipeline kwarg (graceful fallback if
+    # pipeline does not support it). No new model weights required.
+    FLF2V_ENABLED: bool = False          # feature flag — enable after pod validation
+    FLF2V_END_FRAME_MODEL: str = "flux2" # "flux2" | "wan_t2i" — end frame generator
+    # WanCutLastSlot: number of frames to trim from tail of a FLF2V segment before
+    # using it as SVI continuation conditioning for the next segment.
+    # The end-frame-locked tail region causes motion-steering conflicts at the seam.
+    # Wan2.2 VAE temporal stride = 4, so one temporal slot = 4 pixel-space frames.
+    FLF2V_WANCUT_SLOT_FRAMES: int = 4
+
     # === Motion ===
     MOTION_STATIONARY_THRESHOLD: float = 0.02
 
