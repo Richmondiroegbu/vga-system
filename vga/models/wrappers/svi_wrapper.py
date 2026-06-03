@@ -137,9 +137,16 @@ class SVIWrapper:
             # These frames are also hard-replaced post-inference for pixel-identical seams,
             # then trimmed during final assembly.
             "num_overlap_frames": 5,
-            # 0.60 = standard continuation — tight adherence to overlap frames (less face warping).
+            # 0.72 = balanced continuation — sufficient noise to overcome FP8 haze while
+            # preserving enough input_video structure for temporal continuity.
+            # 0.60 was too tight: model over-preserved overlap frame haziness.
+            # 0.75 (original) caused too much face warping at high cfg.
             # Overridden to 0.90 (hard_cut) or 0.80 (blend) for transition segments.
-            "denoising_strength": 0.60,
+            "denoising_strength": 0.72,
+            # sigma_shift=7.0 for SVI continuation (S-09+): SVI 2.0 Pro community recommendation.
+            # sigma_shift=5.0 (Wan2.2 I2V default) misaligns the noise schedule against the
+            # SVI LoRA training distribution → systematically softer/hazier output frames.
+            "sigma_shift": settings.SVI_SIGMA_SHIFT_CONTINUATION,
             # -1 = random seed per segment; fixed seed causes identical outputs across segments.
             "seed": -1,
             "prompt": prompt,

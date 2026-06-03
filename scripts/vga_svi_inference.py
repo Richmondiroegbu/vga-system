@@ -157,31 +157,31 @@ def extract_last_n_frames_as_pil(video_path: str, n: int, skip_last: int = 0) ->
 
 def enhance_frame_sequence_contrast(
     frames: list,
+    n_anchor_frames: int = 0,
     clahe_clip_limit: float = 2.0,
     clahe_tile_size: int = 8,
     target_mean: float = 130.0,
-    target_saturation: float = 90.0,   # HSV S-channel mean target (0-255 scale)
+    target_saturation: float = 90.0,
     max_scale: float = 1.35,
     min_scale: float = 0.80,
-    max_sat_scale: float = 2.0,        # clamp: never more than 2× saturation boost
+    max_sat_scale: float = 2.0,
+    unsharp_strength: float = 0.5,
+    blend_ramp_frames: int = 5,
 ) -> list:
-    """CLAHE + saturation restoration + global mean normalization.
+    """Anchor-aware CLAHE + saturation restoration + brightness normalization.
 
-    FP8 DiT weights cause two cascading failure modes:
-      1. Luminance collapse: pixels cluster toward mean → fog/haze (fixed by CLAHE)
-      2. Saturation collapse: chroma drains toward grey across segments → sepia →
-         greyscale. CLAHE operates on L channel only and does NOT restore saturation.
-         Without explicit saturation correction the 5-frame overlap passed to the next
-         segment carries the desaturation forward, compounding each segment.
+    When n_anchor_frames > 0 (S-09+ mode):
+      - Anchor frames [0..n-1] are the hard-replaced overlap frames from the previous
+        segment — already bright, sharp, correctly exposed. They are returned UNCHANGED.
+      - Target brightness and saturation are derived from anchor stats, not hardcoded
+        constants, so processing targets the actual level of the previous segment.
+      - Unsharp mask is applied to generated frames, calibrated to anchor Laplacian
+        variance — restores edge crispness to match anchor sharpness.
+      - A soft cosine ramp over blend_ramp_frames at the boundary eliminates the
+        perceptual cliff between hard-replaced anchors and processed generated frames.
 
-    Three-stage fix:
-      1. CLAHE in LAB L-channel: restores local contrast, preserves hue/saturation.
-      2. HSV saturation restoration: rescales S channel so the sequence mean reaches
-         target_saturation (~90), breaking the cross-segment desaturation cascade.
-      3. Global mean normalization: anchors brightness to target_mean=130.
-
-    Per-sequence scaling (stages 2 and 3) preserves intra-segment variation while
-    resetting both exposure and saturation for the next segment's conditioning frames.
+    When n_anchor_frames == 0 (S-08 / legacy mode):
+      - All frames processed uniformly against hardcoded target_mean / target_saturation.
     """
     import cv2
     import numpy as np
@@ -190,13 +190,37 @@ def enhance_frame_sequence_contrast(
     if not frames:
         return frames
 
-    # Stage 1: CLAHE in LAB color space — restores local contrast
+    n = n_anchor_frames
+    anchor_frames = frames[:n]
+    gen_frames = frames[n:]
+
+    if not gen_frames:
+        return frames
+
+    # ── Derive targets from anchors (or fall back to constants) ──────────────
+    anchor_lap_var: float | None = None
+    if n > 0:
+        anchor_arrs = [np.array(f) for f in anchor_frames]
+        target_mean = float(np.mean([a.mean() for a in anchor_arrs]))
+        hsv_anchors = [cv2.cvtColor(a, cv2.COLOR_RGB2HSV) for a in anchor_arrs]
+        target_saturation = float(np.mean([h[:, :, 1].mean() for h in hsv_anchors]))
+        anchor_lap_var = float(np.mean([
+            cv2.Laplacian(cv2.cvtColor(a, cv2.COLOR_RGB2GRAY), cv2.CV_64F).var()
+            for a in anchor_arrs
+        ]))
+        print(
+            f"  Anchor stats (frames 0-{n - 1}): "
+            f"brightness={target_mean:.1f} sat={target_saturation:.1f} "
+            f"sharpness(lap)={anchor_lap_var:.1f}"
+        )
+
+    # ── Stage 1: CLAHE in LAB — restore local contrast on generated frames ──
     clahe = cv2.createCLAHE(
         clipLimit=clahe_clip_limit,
         tileGridSize=(clahe_tile_size, clahe_tile_size),
     )
     enhanced_arrs = []
-    for frame in frames:
+    for frame in gen_frames:
         arr = np.array(frame)
         lab = cv2.cvtColor(arr, cv2.COLOR_RGB2LAB)
         l_ch, a_ch, b_ch = cv2.split(lab)
@@ -204,12 +228,10 @@ def enhance_frame_sequence_contrast(
         lab_enhanced = cv2.merge([l_enhanced, a_ch, b_ch])
         enhanced_arrs.append(cv2.cvtColor(lab_enhanced, cv2.COLOR_LAB2RGB))
 
-    # Stage 2: HSV saturation restoration — breaks the cross-segment desaturation cascade.
-    # FP8 quantization drains chroma: segment tails are sepia/grey, poisoning next segment's
-    # conditioning. Re-saturate before saving so conditioning frames look vivid.
+    # ── Stage 2: HSV saturation restoration ─────────────────────────────────
     hsv_arrs = [cv2.cvtColor(a, cv2.COLOR_RGB2HSV).astype(np.float32) for a in enhanced_arrs]
     sat_mean = float(np.mean([a[:, :, 1].mean() for a in hsv_arrs]))
-    if sat_mean > 5.0:  # skip if already near-greyscale source
+    if sat_mean > 5.0:
         sat_scale = float(np.clip(target_saturation / max(sat_mean, 1.0), 1.0, max_sat_scale))
         if sat_scale > 1.02:
             sat_restored = []
@@ -225,24 +247,65 @@ def enhance_frame_sequence_contrast(
         sat_restored = enhanced_arrs
         print(f"  Saturation: sat_mean={sat_mean:.1f} near-grey source, skipping boost")
 
-    # Stage 3: global mean normalization — prevents brightness drift across segments
+    # ── Stage 3: global mean normalization ───────────────────────────────────
     float_arrs = [a.astype(np.float32) for a in sat_restored]
     seq_mean = float(np.mean([a.mean() for a in float_arrs]))
 
     if seq_mean < 5.0:
-        print(f"  Brightness: CLAHE applied, sequence too dark ({seq_mean:.1f}), skipping scale")
-        return [_Image.fromarray(a) for a in sat_restored]
+        print(f"  Brightness: sequence too dark ({seq_mean:.1f}), skipping scale")
+        normalized_arrs = [np.clip(a, 0, 255).astype(np.uint8) for a in float_arrs]
+    else:
+        scale = float(np.clip(target_mean / seq_mean, min_scale, max_scale))
+        print(f"  Brightness: seq_mean={seq_mean:.1f} → target={target_mean:.0f} scale={scale:.3f}")
+        if abs(scale - 1.0) < 0.02:
+            normalized_arrs = [np.clip(a, 0, 255).astype(np.uint8) for a in float_arrs]
+        else:
+            normalized_arrs = [np.clip(a * scale, 0, 255).astype(np.uint8) for a in float_arrs]
 
-    scale = float(np.clip(target_mean / seq_mean, min_scale, max_scale))
-    print(f"  Brightness: seq_mean={seq_mean:.1f} → target={target_mean:.0f} scale={scale:.3f}")
+    # ── Stage 4: unsharp mask — calibrated to anchor sharpness ──────────────
+    if unsharp_strength > 0:
+        sharpened = []
+        for arr in normalized_arrs:
+            blurred = cv2.GaussianBlur(arr, (0, 0), 3.0)
+            if anchor_lap_var is not None:
+                gen_lap = float(
+                    cv2.Laplacian(cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY), cv2.CV_64F).var()
+                )
+                # Boost unsharp proportionally to how much softer the frame is vs anchor.
+                calibrated = float(np.clip(
+                    unsharp_strength * (anchor_lap_var / max(gen_lap, 1.0)) ** 0.5,
+                    0.1, 2.0,
+                ))
+            else:
+                calibrated = unsharp_strength
+            sharp = cv2.addWeighted(
+                arr.astype(np.float32), 1.0 + calibrated,
+                blurred.astype(np.float32), -calibrated, 0,
+            )
+            sharpened.append(np.clip(sharp, 0, 255).astype(np.uint8))
+        normalized_arrs = sharpened
+        print(f"  Unsharp: base_strength={unsharp_strength:.2f} (calibrated per-frame to anchor_lap={anchor_lap_var})")
 
-    if abs(scale - 1.0) < 0.02:
-        return [_Image.fromarray(np.clip(a, 0, 255).astype(np.uint8)) for a in float_arrs]
+    gen_result_pil = [_Image.fromarray(a) for a in normalized_arrs]
 
-    return [
-        _Image.fromarray(np.clip(a * scale, 0, 255).astype(np.uint8))
-        for a in float_arrs
-    ]
+    # ── Stage 5: soft cosine ramp at anchor→generated boundary ──────────────
+    # Eliminates the perceptual cliff between hard-replaced anchor frames and
+    # the processed generated frames. Ramp: alpha 0→1 over blend_ramp_frames,
+    # where alpha=0 keeps original gen pixels, alpha=1 uses fully processed.
+    if n > 0 and blend_ramp_frames > 0 and gen_result_pil:
+        ramp_n = min(blend_ramp_frames, len(gen_result_pil))
+        orig_arrs = [np.array(f).astype(np.float32) for f in gen_frames[:ramp_n]]
+        enh_arrs = [np.array(f).astype(np.float32) for f in gen_result_pil[:ramp_n]]
+        ramped = []
+        for i in range(ramp_n):
+            # Cosine ease-in: slow ramp at start, faster finish
+            alpha = (1.0 - math.cos(math.pi * (i + 1) / (ramp_n + 1))) / 2.0
+            blended = orig_arrs[i] * (1.0 - alpha) + enh_arrs[i] * alpha
+            ramped.append(_Image.fromarray(np.clip(blended, 0, 255).astype(np.uint8)))
+        gen_result_pil = ramped + gen_result_pil[ramp_n:]
+        print(f"  Boundary ramp: {ramp_n} cosine-blended frames at anchor→generated seam")
+
+    return list(anchor_frames) + gen_result_pil
 
 
 def load_fp8_state_dict(fp8_dir: str) -> dict:
@@ -469,7 +532,7 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
     #   0.75 = moderate noise, preserves structure but allows heavy face reconstruction → warping
     #   0.60 = lower noise, tighter adherence to overlap frames → sharper faces, less warping
     # S-08 I2V mode always uses 1.0 (we want full generation from the still image).
-    denoising_strength_continuation = float(config.get("denoising_strength", 0.60))
+    denoising_strength_continuation = float(config.get("denoising_strength", 0.72))
     # ref_image_path: optional path to original reference image (S-07 refined portrait).
     # When provided, passed as `anchor` to WanVideoSviPipeline.__call__().
     # Keeps original character visible in all attention layers of every S-09 segment.
@@ -530,10 +593,12 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
             num_inference_steps=steps,
             tiled=False,
             seed=seed_val,
-            # sigma_shift=5.0: official recommended value for Wan2.2 + SVI.
-            # Controls the noise schedule shift — lower values preserve motion/dynamics,
-            # higher values favor static detail. 5.0 is the vita-epfl default for svi_wan22.
-            sigma_shift=5.0,
+            # sigma_shift: read from config.
+            # S-08 I2V: 5.0 (official Wan2.2 I2V recommendation).
+            # S-09+ SVI continuation: 7.0 (SVI 2.0 Pro community recommendation).
+            # Using 5.0 for SVI continuation misaligns noise schedule against LoRA
+            # training distribution → systematically softer/hazier frames.
+            sigma_shift=float(config.get("sigma_shift", 5.0)),
         )
         # num_motion_latent is an __init__ param of SviPipeline wrapper, NOT a __call__ param.
         # WanVideoSviPipeline.__call__ does not accept it — it was removed to fix TypeError.
@@ -777,7 +842,14 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
         # assembly) are also normalized; their brightness is visible to the next
         # segment's conditioning extractor.
         if isinstance(video_frames, list):
-            video_frames = enhance_frame_sequence_contrast(video_frames, target_mean=130.0)
+            n_anchor = len(overlap_frames_pil) if overlap_frames_pil is not None else 0
+            video_frames = enhance_frame_sequence_contrast(
+                video_frames,
+                n_anchor_frames=n_anchor,
+                target_mean=130.0,
+                unsharp_strength=0.5,
+                blend_ramp_frames=5,
+            )
 
         from diffsynth.utils.data import save_video
         save_video(video_frames, str(output_path), fps=15, quality=5)

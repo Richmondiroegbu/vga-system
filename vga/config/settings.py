@@ -63,6 +63,15 @@ class VGASettings(BaseSettings):
     SVI_WAN22_TORCH_VERSION: str = "2.7.1"
     SVI_WAN22_CUDA_INDEX: str = "cu128"
 
+    # === SVI Noise Schedule ===
+    # sigma_shift controls the noise schedule distribution.
+    # For base Wan2.2 I2V (S-08): 5.0 — official Wan2.2 recommendation for I2V.
+    # For SVI continuation (S-09+): 7.0 — SVI 2.0 Pro community recommendation.
+    # Using 5.0 (I2V value) for SVI continuation misaligns the schedule against the
+    # SVI LoRA's training distribution, producing systematically softer/hazier frames.
+    SVI_SIGMA_SHIFT_I2V: float = 5.0           # S-08 base I2V generation
+    SVI_SIGMA_SHIFT_CONTINUATION: float = 7.0  # S-09+ SVI autoregressive continuation
+
     # === SVI Persistent Server (speed optimisation) ===
     # SVIWrapper starts vga_svi_server.py as a background daemon on first segment
     # call. All subsequent segments POST to the warm server instead of spawning a
