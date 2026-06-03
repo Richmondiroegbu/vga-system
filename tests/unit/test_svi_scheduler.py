@@ -17,10 +17,10 @@ def test_cfg_below_minimum_raises():
 
 
 def test_cfg_above_maximum_raises():
-    """CFG above 6.0 raises SVICFGViolationError. RULE-86."""
+    """CFG above 8.0 raises SVICFGViolationError. RULE-86. (Max is 8.0, raised from 6.0.)"""
     with pytest.raises(SVICFGViolationError) as exc_info:
-        SVIScheduler(cfg=6.5, steps=30)
-    assert exc_info.value.cfg_value == 6.5
+        SVIScheduler(cfg=8.01, steps=30)
+    assert exc_info.value.cfg_value == 8.01
 
 
 def test_cfg_at_minimum_valid():
@@ -30,9 +30,9 @@ def test_cfg_at_minimum_valid():
 
 
 def test_cfg_at_maximum_valid():
-    """CFG exactly 6.0 is valid."""
-    scheduler = SVIScheduler(cfg=6.0, steps=30)
-    assert scheduler.cfg == 6.0
+    """CFG exactly 8.0 (current max) is valid."""
+    scheduler = SVIScheduler(cfg=8.0, steps=30)
+    assert scheduler.cfg == 8.0
 
 
 def test_high_noise_weight_at_step_0():
@@ -78,8 +78,9 @@ def test_get_steps_critical():
 
 def test_high_noise_phase_classification():
     """Step with fraction > 0.67 classified as HIGH_NOISE."""
+    # SVIScheduler floors steps at STEPS_STANDARD (50), so total=50 regardless of input.
     scheduler = SVIScheduler(cfg=5.5, steps=30)
-    step = int(0.9 * 29)   # fraction ~0.9 > 0.67
+    step = int(0.9 * 49)   # fraction = 44/49 ≈ 0.898 > 0.67 → HIGH_NOISE
     assert scheduler.get_noise_phase(step) == TemporalPhase.HIGH_NOISE
 
 

@@ -21,9 +21,9 @@ def test_clip_identity_threshold():
 
 
 def test_svi_cfg_range():
-    """SVI CFG range must be [5.0, 6.0]. RULE-86."""
+    """SVI CFG range must be [5.0, 8.0]. RULE-86. (Max raised to 8.0 — vita-epfl recommends 7.0 for non-distill SVI.)"""
     assert settings.SVI_CFG_MIN == 5.0
-    assert settings.SVI_CFG_MAX == 6.0
+    assert settings.SVI_CFG_MAX == 8.0
 
 
 def test_lora_weights():

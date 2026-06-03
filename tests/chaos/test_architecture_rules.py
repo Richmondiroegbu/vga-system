@@ -49,8 +49,9 @@ def test_rule_86_svi_cfg_below_range_raises():
 
 
 def test_rule_86_svi_cfg_above_range_raises():
+    # Max is now 8.0 (raised from 6.0 — vita-epfl recommends 7.0 for non-distill SVI)
     with pytest.raises(SVICFGViolationError):
-        SVIScheduler(cfg=6.01, steps=30)
+        SVIScheduler(cfg=8.01, steps=30)
 
 
 # RULE-88: CompositionPlan enforcement

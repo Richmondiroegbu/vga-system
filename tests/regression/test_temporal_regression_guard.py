@@ -63,11 +63,11 @@ class TestTemporalRegressionGuard:
         with pytest.raises(SVICFGViolationError):
             SVIScheduler(cfg=4.99, steps=30)
 
-    def test_r7_svi_scheduler_rejects_cfg_above_6(self):
-        """R7: SVIScheduler raises on CFG > 6.0. RULE-86."""
+    def test_r7_svi_scheduler_rejects_cfg_above_8(self):
+        """R7: SVIScheduler raises on CFG > 8.0. RULE-86. (Max raised from 6.0 to 8.0.)"""
         from vga.core.exceptions import SVICFGViolationError
         with pytest.raises(SVICFGViolationError):
-            SVIScheduler(cfg=6.01, steps=30)
+            SVIScheduler(cfg=8.01, steps=30)
 
     def test_r8_lora_weight_varies_by_phase(self):
         """R8: LoRA weight must differ between high/mid/low noise phases. RULE-86 dynamic scheduling."""

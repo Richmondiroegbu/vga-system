@@ -10,17 +10,18 @@ from vga.core.exceptions import SVICFGViolationError
 from vga.temporal.svi_scheduler import SVIScheduler
 
 
-@pytest.mark.parametrize("bad_cfg", [0.0, 1.0, 4.99, 6.01, 7.0, 10.0, -1.0, 100.0])
+@pytest.mark.parametrize("bad_cfg", [0.0, 1.0, 4.99, 8.01, 9.0, 10.0, -1.0, 100.0])
 def test_svi_scheduler_raises_on_out_of_range_cfg(bad_cfg):
-    """SVIScheduler raises SVICFGViolationError for CFG outside [5.0, 6.0]. RULE-86."""
+    """SVIScheduler raises SVICFGViolationError for CFG outside [5.0, 8.0]. RULE-86.
+    (Max raised to 8.0 — vita-epfl recommends 7.0 for non-distill SVI.)"""
     with pytest.raises(SVICFGViolationError) as exc_info:
         SVIScheduler(cfg=bad_cfg, steps=30)
     assert exc_info.value.cfg_value == bad_cfg
 
 
-@pytest.mark.parametrize("valid_cfg", [5.0, 5.5, 6.0, 5.1, 5.9])
+@pytest.mark.parametrize("valid_cfg", [5.0, 5.5, 6.0, 7.0, 8.0])
 def test_svi_scheduler_accepts_valid_cfg(valid_cfg):
-    """SVIScheduler accepts all CFG values within [5.0, 6.0]."""
+    """SVIScheduler accepts all CFG values within [5.0, 8.0]."""
     scheduler = SVIScheduler(cfg=valid_cfg, steps=30)
     assert scheduler.cfg == valid_cfg
 
