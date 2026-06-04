@@ -137,6 +137,11 @@ class VGASettings(BaseSettings):
     # pipeline does not support it). No new model weights required.
     FLF2V_ENABLED: bool = False          # feature flag — enable after pod validation
     FLF2V_END_FRAME_MODEL: str = "flux2" # "flux2" | "wan_t2i" — end frame generator
+    # Z-Image-Turbo polish on each FLUX-generated end frame (S-07c).
+    # denoise=0.10 — same conservative strength as S-07 character refinement.
+    # Sharpens edges/texture without altering scene composition or identity.
+    FLF2V_ZIMAGE_POLISH: bool = True
+    FLF2V_ZIMAGE_DENOISE: float = 0.10
     # WanCutLastSlot: number of frames to trim from tail of a FLF2V segment before
     # using it as SVI continuation conditioning for the next segment.
     # The end-frame-locked tail region causes motion-steering conflicts at the seam.

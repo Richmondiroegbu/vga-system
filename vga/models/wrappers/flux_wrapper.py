@@ -96,6 +96,54 @@ class FluxWrapper:
         full_prompt = self._build_composition_prompt(prompt, composition_plan)
         return self._infer_with_image(reference_image, full_prompt)
 
+    def generate_end_frame(
+        self,
+        action_description: str,
+        composition_plan: CompositionPlanSchema,
+        character_description: str = "",
+        seed: int = 42,
+    ) -> "PIL.Image.Image":
+        """Generate one FLF2V end-frame showing where a segment's action ends.
+
+        End frames depict the SCENE STATE at the conclusion of a video segment —
+        not a character portrait. No LoRA is loaded (scene composition does not
+        need identity LoRA; end frames need environmental accuracy, not face lock).
+
+        Args:
+            action_description:    the segment's action_description (the endpoint state)
+            composition_plan:      CompositionPlan for camera/lighting context (RULE-88)
+            character_description: brief appearance hint to keep character consistent
+            seed:                  random seed (varied per segment to avoid duplicates)
+
+        Returns:
+            PIL Image showing the scene at the end of the action
+        """
+        self._ensure_loaded()
+
+        # Unload any LoRA — end frames must not have identity LoRA applied.
+        # Identity preservation comes from Z-Image-Turbo polish (S-07c), not LoRA.
+        if self._lora_loaded is not None:
+            self.unload_lora()
+
+        char_hint = f"{character_description}, " if character_description else ""
+        position = (
+            composition_plan.character_positions[0].get("position", "center")
+            if composition_plan.character_positions else "center"
+        )
+
+        prompt = (
+            f"{char_hint}"
+            f"{action_description}, "
+            f"{composition_plan.camera_angle} shot, "
+            f"{composition_plan.lighting_style} lighting, "
+            f"character {position} of frame, "
+            f"focus on {composition_plan.focus_subject}, "
+            f"cinematic still, photorealistic, sharp, high detail"
+        )
+
+        logger.info("FluxWrapper: generating FLF2V end frame (seed=%d)", seed)
+        return self._infer(prompt, seed=seed)
+
     def unload_lora(self) -> None:
         """Remove any loaded LoRA adapter from the pipeline."""
         if self._pipe is not None and self._lora_loaded is not None:

@@ -37,8 +37,9 @@ STAGE_PREREQUISITES: dict[str, str] = {
     "S-04": "S-02",  # SceneCompositionAgent needs ScenePlan
     "S-05": "S-04",  # BaseImageAgent needs CompositionPlan
     "S-06": "S-05",  # IdentityReinforcement needs BaseImages
-    "S-07": "S-06",  # ImageRefinement needs ReinforcedImages
-    "S-08": "S-07",  # VideoSegmentGenerator needs RefinedImage
+    "S-07": "S-06",   # ImageRefinement needs ReinforcedImages
+    "S-07c": "S-07",  # EndFrameGenerator needs frozen char_identity_ref (S-07 output)
+    "S-08": "S-07",   # VideoSegmentGenerator needs RefinedImage (S-07c is conditional)
     "S-09": "S-08",  # TemporalEngine needs Segment_1
     "S-10": "S-09",  # ContinuityValidation needs all segments
     "S-11": "S-10",  # DialogueAgent needs continuity-validated segments
