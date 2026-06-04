@@ -1,7 +1,9 @@
 """
-QwenWrapper — wraps Qwen2.5-14B-Instruct (unsloth 4bit).
+QwenWrapper — wraps Qwen3-14B-Instruct (BF16, direct GPU load).
 Used at S-01 (ScriptAgent) and S-04 (SceneCompositionAgent).
 Spec: VGA Model Stack Setup Guide v7.2 §2.1
+Upgrade: Qwen2.5-14B → Qwen3-14B (Apache 2.0, better structured JSON output).
+Download: huggingface-cli download Qwen/Qwen3-14B --local-dir /workspace/models/qwen
 """
 from __future__ import annotations
 
@@ -27,13 +29,17 @@ _JSON_SYSTEM_PROMPT = (
 
 
 class QwenWrapper:
-    """Wraps Qwen2.5-14B-Instruct (unsloth 4bit) for structured text generation.
+    """Wraps Qwen3-14B-Instruct (BF16) for structured text generation.
+
+    Thinking mode is explicitly disabled (enable_thinking=False) so the model
+    returns JSON directly without a <think>...</think> prefix block, which
+    would break the JSON extraction and add unnecessary latency.
 
     All inference requests use generate_structured() which binds output to a
     Pydantic schema and retries up to max_retries on validation failure.
     """
 
-    MODEL_KEY = "qwen2.5-14b"
+    MODEL_KEY = "qwen3-14b"
 
     def __init__(self) -> None:
         self._tokenizer = None
@@ -102,8 +108,14 @@ class QwenWrapper:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt},
             ]
+            # enable_thinking=False: Qwen3 defaults to chain-of-thought mode which
+            # prepends a <think>...</think> block before the answer. This breaks
+            # JSON extraction and adds 5-30s of unnecessary compute per call.
             text = self._tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
             )
             inputs = self._tokenizer(text, return_tensors="pt").to(self._model.device)
             with torch.no_grad():
@@ -120,11 +132,11 @@ class QwenWrapper:
             raise ModelLoadError(f"QwenWrapper inference failed: {exc}") from exc
 
     def _ensure_loaded(self) -> None:
-        """Lazy-load Qwen2.5-14B-Instruct in bfloat16 directly on GPU.
+        """Lazy-load Qwen3-14B-Instruct in bfloat16 directly on GPU.
 
-        Uses standard float16 loading — no bitsandbytes required.
-        Model: Qwen/Qwen2.5-14B-Instruct (28 GB bfloat16, fits in RTX 5090 32 GB VRAM).
-        Generation speed: ~50-100 tokens/second on GPU vs ~3-5 on CPU.
+        Uses standard BF16 loading — no bitsandbytes required.
+        Model: Qwen/Qwen3-14B (~28 GB BF16, fits comfortably in RTX PRO 6000 96GB).
+        Generation speed: ~80-120 tokens/second on GPU.
         """
         if self._model is not None:
             return

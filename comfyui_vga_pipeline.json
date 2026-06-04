@@ -1,0 +1,329 @@
+{
+  "last_node_id": 87,
+  "last_link_id": 130,
+  "nodes": [
+
+    {"id":1,"type":"MarkdownNote","pos":[50,50],"size":[500,320],"flags":{},"order":0,"mode":0,"inputs":[],"outputs":[],"title":"VGA v17.2 — ComfyUI Pipeline","properties":{},"widgets_values":["## VGA v17.2 ComfyUI Pipeline\n\n**Required custom nodes (install via ComfyUI Manager):**\n- `ComfyUI-IPAdapter-Flux` (Shakker-Labs)\n- `ComfyUI-Wan-SVI2Pro-FLF` (Well-Made)\n- `ComfyUI-LatentSyncWrapper` (ShmuelRonen)\n- `ComfyUI-pause` (wywywywy)\n- `ComfyUI-MMAudio` (kijai)\n- `ComfyUI-MusicGen-HF` (ebrinz)\n- `CosyVoice-ComfyUI` or `ComfyUI_FL-CosyVoice3`\n\n**Flow:** S-05 FLUX image → S-06 LoRA reinforce → S-07 Z-Image refine → S-08 Wan2.2 I2V Seg1 → S-09 SVI Segs 2-4 → S-11 TTS → S-12 LipSync → S-13 MMAudio → S-14 MusicGen\n\n**HRG pause gates:** HRG-5 through HRG-11 (7 checkpoints)"],"color":"#222","bgcolor":"#000"},
+
+    {"id":2,"type":"LoadImage","pos":[50,420],"size":[315,314],"flags":{},"order":1,"mode":0,"inputs":[],"outputs":[{"name":"IMAGE","type":"IMAGE","links":[1,26],"slot_index":0},{"name":"MASK","type":"MASK","links":null,"slot_index":1}],"properties":{"Node name for S&R":"LoadImage"},"widgets_values":["character_reference.jpg","image"],"title":"Character Reference (IP-Adapter)"},
+
+    {"id":3,"type":"LoadImage","pos":[50,780],"size":[315,314],"flags":{},"order":2,"mode":0,"inputs":[],"outputs":[{"name":"IMAGE","type":"IMAGE","links":[2],"slot_index":0},{"name":"MASK","type":"MASK","links":null,"slot_index":1}],"properties":{"Node name for S&R":"LoadImage"},"widgets_values":["end_frame_target.jpg","image"],"title":"FLF2V End Frame Target"},
+
+    {"id":4,"type":"DualCLIPLoader","pos":[600,0],"size":[350,150],"flags":{},"order":3,"mode":0,"inputs":[],"outputs":[{"name":"CLIP","type":"CLIP","links":[3,4,5],"slot_index":0}],"properties":{"Node name for S&R":"DualCLIPLoader"},"widgets_values":["t5xxl_fp16.safetensors","clip_l.safetensors","flux"],"title":"FLUX Text Encoders (T5+CLIP-L)"},
+
+    {"id":5,"type":"UNETLoader","pos":[600,200],"size":[350,120],"flags":{},"order":4,"mode":0,"inputs":[],"outputs":[{"name":"MODEL","type":"MODEL","links":[6,7],"slot_index":0}],"properties":{"Node name for S&R":"UNETLoader"},"widgets_values":["flux2-klein-4b-bf16.safetensors","default"],"title":"FLUX.2-klein-4B Model (S-05/06)"},
+
+    {"id":6,"type":"VAELoader","pos":[600,370],"size":[350,100],"flags":{},"order":5,"mode":0,"inputs":[],"outputs":[{"name":"VAE","type":"VAE","links":[8,9,10],"slot_index":0}],"properties":{"Node name for S&R":"VAELoader"},"widgets_values":["ae.safetensors"],"title":"FLUX VAE"},
+
+    {"id":7,"type":"IPAdapterFluxLoader","pos":[600,520],"size":[350,100],"flags":{},"order":6,"mode":0,"inputs":[],"outputs":[{"name":"IPADAPTER","type":"IPADAPTER","links":[11],"slot_index":0}],"properties":{"Node name for S&R":"IPAdapterFluxLoader"},"widgets_values":["xflux_ip-adapter_v2.safetensors"],"title":"IP-Adapter FLUX Loader"},
+
+    {"id":8,"type":"ApplyIPAdapterFlux","pos":[1000,200],"size":[350,150],"flags":{},"order":10,"mode":0,"inputs":[{"name":"model","type":"MODEL","link":6},{"name":"ipadapter","type":"IPADAPTER","link":11},{"name":"image","type":"IMAGE","link":1}],"outputs":[{"name":"MODEL","type":"MODEL","links":[12],"slot_index":0}],"properties":{"Node name for S&R":"ApplyIPAdapterFlux"},"widgets_values":[0.85,0.0,1.0],"title":"Apply IP-Adapter (Identity Lock)"},
+
+    {"id":9,"type":"CLIPTextEncode","pos":[1000,0],"size":[500,180],"flags":{},"order":8,"mode":0,"inputs":[{"name":"clip","type":"CLIP","link":3}],"outputs":[{"name":"CONDITIONING","type":"CONDITIONING","links":[13],"slot_index":0}],"properties":{"Node name for S&R":"CLIPTextEncode"},"widgets_values":["cinematic portrait, photorealistic, a determined person standing strong, expressive face, natural light, sharp focus, high detail, motivational scene"],"color":"#232","bgcolor":"#353","title":"Positive Prompt (S-05/06)"},
+
+    {"id":10,"type":"CLIPTextEncode","pos":[1000,220],"size":[500,140],"flags":{},"order":9,"mode":0,"inputs":[{"name":"clip","type":"CLIP","link":4}],"outputs":[{"name":"CONDITIONING","type":"CONDITIONING","links":[14,15],"slot_index":0}],"properties":{"Node name for S&R":"CLIPTextEncode"},"widgets_values":["blurry, deformed, extra limbs, bad anatomy, watermark, text, low quality, cartoon, painting, sketch"],"color":"#322","bgcolor":"#533","title":"Negative Prompt (S-05/06)"},
+
+    {"id":11,"type":"FluxGuidance","pos":[1550,0],"size":[280,100],"flags":{},"order":11,"mode":0,"inputs":[{"name":"conditioning","type":"CONDITIONING","link":13}],"outputs":[{"name":"CONDITIONING","type":"CONDITIONING","links":[16,17],"slot_index":0}],"properties":{"Node name for S&R":"FluxGuidance"},"widgets_values":[3.5],"title":"FLUX Guidance (CFG 3.5)"},
+
+    {"id":12,"type":"EmptyLatentImage","pos":[1000,420],"size":[315,130],"flags":{},"order":7,"mode":0,"inputs":[],"outputs":[{"name":"LATENT","type":"LATENT","links":[18],"slot_index":0}],"properties":{"Node name for S&R":"EmptyLatentImage"},"widgets_values":[832,480,1],"title":"Empty Latent 832x480"},
+
+    {"id":13,"type":"KSampler","pos":[1880,0],"size":[315,330],"flags":{},"order":14,"mode":0,"inputs":[{"name":"model","type":"MODEL","link":12},{"name":"positive","type":"CONDITIONING","link":16},{"name":"negative","type":"CONDITIONING","link":14},{"name":"latent_image","type":"LATENT","link":18}],"outputs":[{"name":"LATENT","type":"LATENT","links":[19],"slot_index":0}],"properties":{"Node name for S&R":"KSampler"},"widgets_values":[42,"fixed",4,1.0,"euler","simple",1.0],"title":"KSampler S-05 (4 steps, FLUX turbo)"},
+
+    {"id":14,"type":"VAEDecode","pos":[2250,0],"size":[230,100],"flags":{},"order":15,"mode":0,"inputs":[{"name":"samples","type":"LATENT","link":19},{"name":"vae","type":"VAE","link":8}],"outputs":[{"name":"IMAGE","type":"IMAGE","links":[20,21],"slot_index":0}],"properties":{"Node name for S&R":"VAEDecode"},"widgets_values":[],"title":"VAE Decode S-05"},
+
+    {"id":15,"type":"SaveImage","pos":[2530,0],"size":[420,250],"flags":{},"order":16,"mode":0,"inputs":[{"name":"images","type":"IMAGE","link":20}],"outputs":[],"properties":{"Node name for S&R":"SaveImage"},"widgets_values":["S05_base_image"],"title":"Save S-05 Base Images"},
+
+    {"id":16,"type":"PauseWorkflowNode","pos":[2530,300],"size":[320,100],"flags":{},"order":17,"mode":0,"inputs":[],"outputs":[],"properties":{"Node name for S&R":"PauseWorkflowNode"},"widgets_values":[],"title":"⏸ HRG-5: Review Base Images — Click Continue to proceed"},
+
+    {"id":17,"type":"LoraLoaderModelOnly","pos":[600,640],"size":[350,140],"flags":{},"order":12,"mode":0,"inputs":[{"name":"model","type":"MODEL","link":7}],"outputs":[{"name":"MODEL","type":"MODEL","links":[22],"slot_index":0}],"properties":{"Node name for S&R":"LoraLoaderModelOnly"},"widgets_values":["f2k_4B_consist_20260314.safetensors",0.8],"title":"Consistency LoRA (S-06 Identity Reinforce)"},
+
+    {"id":18,"type":"VAEEncode","pos":[2250,130],"size":[230,110],"flags":{},"order":18,"mode":0,"inputs":[{"name":"pixels","type":"IMAGE","link":21},{"name":"vae","type":"VAE","link":9}],"outputs":[{"name":"LATENT","type":"LATENT","links":[23],"slot_index":0}],"properties":{"Node name for S&R":"VAEEncode"},"widgets_values":[],"title":"VAE Encode S-06 (img2img)"},
+
+    {"id":19,"type":"KSampler","pos":[1880,350],"size":[315,330],"flags":{},"order":19,"mode":0,"inputs":[{"name":"model","type":"MODEL","link":22},{"name":"positive","type":"CONDITIONING","link":17},{"name":"negative","type":"CONDITIONING","link":15},{"name":"latent_image","type":"LATENT","link":23}],"outputs":[{"name":"LATENT","type":"LATENT","links":[24],"slot_index":0}],"properties":{"Node name for S&R":"KSampler"},"widgets_values":[42,"fixed",4,1.0,"euler","simple",0.65],"title":"KSampler S-06 (img2img denoise=0.65)"},
+
+    {"id":20,"type":"VAEDecode","pos":[2250,350],"size":[230,100],"flags":{},"order":20,"mode":0,"inputs":[{"name":"samples","type":"LATENT","link":24},{"name":"vae","type":"VAE","link":10}],"outputs":[{"name":"IMAGE","type":"IMAGE","links":[25,26,27],"slot_index":0}],"properties":{"Node name for S&R":"VAEDecode"},"widgets_values":[],"title":"VAE Decode S-06"},
+
+    {"id":21,"type":"SaveImage","pos":[2530,350],"size":[420,250],"flags":{},"order":21,"mode":0,"inputs":[{"name":"images","type":"IMAGE","link":25}],"outputs":[],"properties":{"Node name for S&R":"SaveImage"},"widgets_values":["S06_identity_reinforced"],"title":"Save S-06 Identity Reinforced"},
+
+    {"id":22,"type":"PauseWorkflowNode","pos":[2530,640],"size":[320,100],"flags":{},"order":22,"mode":0,"inputs":[],"outputs":[],"properties":{"Node name for S&R":"PauseWorkflowNode"},"widgets_values":[],"title":"⏸ HRG-6: Review Identity Reinforcement"},
+
+    {"id":23,"type":"UNETLoader","pos":[600,900],"size":[350,120],"flags":{},"order":23,"mode":0,"inputs":[],"outputs":[{"name":"MODEL","type":"MODEL","links":[28],"slot_index":0}],"properties":{"Node name for S&R":"UNETLoader"},"widgets_values":["z-image-turbo.safetensors","default"],"title":"Z-Image-Turbo Model (S-07)"},
+
+    {"id":24,"type":"CLIPLoader","pos":[600,1070],"size":[350,150],"flags":{},"order":24,"mode":0,"inputs":[],"outputs":[{"name":"CLIP","type":"CLIP","links":[29,30],"slot_index":0}],"properties":{"Node name for S&R":"CLIPLoader"},"widgets_values":["t5xxl_fp16.safetensors","sd3","default"],"title":"Z-Image Text Encoder"},
+
+    {"id":25,"type":"VAELoader","pos":[600,1260],"size":[350,100],"flags":{},"order":25,"mode":0,"inputs":[],"outputs":[{"name":"VAE","type":"VAE","links":[31,32],"slot_index":0}],"properties":{"Node name for S&R":"VAELoader"},"widgets_values":["ae.safetensors"],"title":"Z-Image VAE"},
+
+    {"id":26,"type":"CLIPTextEncode","pos":[1000,900],"size":[500,160],"flags":{},"order":26,"mode":0,"inputs":[{"name":"clip","type":"CLIP","link":29}],"outputs":[{"name":"CONDITIONING","type":"CONDITIONING","links":[33],"slot_index":0}],"properties":{"Node name for S&R":"CLIPTextEncode"},"widgets_values":["cinematic portrait, photorealistic, sharp focus, natural skin texture, detailed face, identity preserved, high quality"],"color":"#232","bgcolor":"#353","title":"Positive Prompt S-07"},
+
+    {"id":27,"type":"CLIPTextEncode","pos":[1000,1100],"size":[500,140],"flags":{},"order":27,"mode":0,"inputs":[{"name":"clip","type":"CLIP","link":30}],"outputs":[{"name":"CONDITIONING","type":"CONDITIONING","links":[34],"slot_index":0}],"properties":{"Node name for S&R":"CLIPTextEncode"},"widgets_values":["blurry, low quality, oversmoothed, plastic skin, watermark"],"color":"#322","bgcolor":"#533","title":"Negative Prompt S-07"},
+
+    {"id":28,"type":"VAEEncode","pos":[2250,700],"size":[230,110],"flags":{},"order":28,"mode":0,"inputs":[{"name":"pixels","type":"IMAGE","link":27},{"name":"vae","type":"VAE","link":31}],"outputs":[{"name":"LATENT","type":"LATENT","links":[35],"slot_index":0}],"properties":{"Node name for S&R":"VAEEncode"},"widgets_values":[],"title":"VAE Encode S-07 (Z-Image refinement)"},
+
+    {"id":29,"type":"KSampler","pos":[2530,850],"size":[315,330],"flags":{},"order":29,"mode":0,"inputs":[{"name":"model","type":"MODEL","link":28},{"name":"positive","type":"CONDITIONING","link":33},{"name":"negative","type":"CONDITIONING","link":34},{"name":"latent_image","type":"LATENT","link":35}],"outputs":[{"name":"LATENT","type":"LATENT","links":[36],"slot_index":0}],"properties":{"Node name for S&R":"KSampler"},"widgets_values":[42,"fixed",8,5.0,"euler","simple",0.10],"title":"KSampler S-07 (denoise=0.10, identity-safe refinement)"},
+
+    {"id":30,"type":"VAEDecode","pos":[2900,850],"size":[230,100],"flags":{},"order":30,"mode":0,"inputs":[{"name":"samples","type":"LATENT","link":36},{"name":"vae","type":"VAE","link":32}],"outputs":[{"name":"IMAGE","type":"IMAGE","links":[37,38,39,40],"slot_index":0}],"properties":{"Node name for S&R":"VAEDecode"},"widgets_values":[],"title":"VAE Decode S-07 (REFINED CHARACTER — IDENTITY FROZEN)"},
+
+    {"id":31,"type":"SaveImage","pos":[3180,850],"size":[420,250],"flags":{},"order":31,"mode":0,"inputs":[{"name":"images","type":"IMAGE","link":37}],"outputs":[],"properties":{"Node name for S&R":"SaveImage"},"widgets_values":["S07_refined_character"],"title":"Save S-07 Refined Character (char_identity_ref)"},
+
+    {"id":32,"type":"PauseWorkflowNode","pos":[3180,1140],"size":[420,100],"flags":{},"order":32,"mode":0,"inputs":[],"outputs":[],"properties":{"Node name for S&R":"PauseWorkflowNode"},"widgets_values":[],"title":"⏸ HRG-7: IDENTITY FROZEN HERE — Last chance to change character appearance"},
+
+    {"id":33,"type":"UNETLoader","pos":[100,1500],"size":[380,120],"flags":{},"order":33,"mode":0,"inputs":[],"outputs":[{"name":"MODEL","type":"MODEL","links":[41],"slot_index":0}],"properties":{"Node name for S&R":"UNETLoader"},"widgets_values":["wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors","default"],"title":"Wan2.2 HIGH Noise DiT"},
+
+    {"id":34,"type":"UNETLoader","pos":[100,1680],"size":[380,120],"flags":{},"order":34,"mode":0,"inputs":[],"outputs":[{"name":"MODEL","type":"MODEL","links":[42],"slot_index":0}],"properties":{"Node name for S&R":"UNETLoader"},"widgets_values":["wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors","default"],"title":"Wan2.2 LOW Noise DiT"},
+
+    {"id":35,"type":"LoraLoaderModelOnly","pos":[550,1500],"size":[380,140],"flags":{},"order":37,"mode":0,"inputs":[{"name":"model","type":"MODEL","link":41}],"outputs":[{"name":"MODEL","type":"MODEL","links":[43,44],"slot_index":0}],"properties":{"Node name for S&R":"LoraLoaderModelOnly"},"widgets_values":["SVI_Wan2.2-I2V-A14B_high_noise_lora_v2.0_pro.safetensors",0.6],"title":"SVI LoRA HIGH Noise (weight=0.6)"},
+
+    {"id":36,"type":"LoraLoaderModelOnly","pos":[550,1680],"size":[380,140],"flags":{},"order":38,"mode":0,"inputs":[{"name":"model","type":"MODEL","link":42}],"outputs":[{"name":"MODEL","type":"MODEL","links":[45,46],"slot_index":0}],"properties":{"Node name for S&R":"LoraLoaderModelOnly"},"widgets_values":["SVI_Wan2.2-I2V-A14B_low_noise_lora_v2.0_pro.safetensors",0.4],"title":"SVI LoRA LOW Noise (weight=0.4)"},
+
+    {"id":37,"type":"CLIPLoader","pos":[100,1860],"size":[380,150],"flags":{},"order":35,"mode":0,"inputs":[],"outputs":[{"name":"CLIP","type":"CLIP","links":[47,48],"slot_index":0}],"properties":{"Node name for S&R":"CLIPLoader"},"widgets_values":["umt5_xxl_fp8_e4m3fn_scaled.safetensors","wan","default"],"title":"Wan2.2 Text Encoder (UMT5-XXL)"},
+
+    {"id":38,"type":"VAELoader","pos":[100,2060],"size":[380,100],"flags":{},"order":36,"mode":0,"inputs":[],"outputs":[{"name":"VAE","type":"VAE","links":[49,50,51,52,53],"slot_index":0}],"properties":{"Node name for S&R":"VAELoader"},"widgets_values":["wan_2.1_vae.safetensors"],"title":"Wan2.1 VAE"},
+
+    {"id":39,"type":"CLIPTextEncode","pos":[1000,1500],"size":[550,220],"flags":{},"order":39,"mode":0,"inputs":[{"name":"clip","type":"CLIP","link":47}],"outputs":[{"name":"CONDITIONING","type":"CONDITIONING","links":[54,55,56,57],"slot_index":0}],"properties":{"Node name for S&R":"CLIPTextEncode"},"widgets_values":["A determined person stands with quiet confidence. Natural human movement, expressive gestures, dynamic body language. Cinematic quality, photorealistic, vivid colors, high contrast, sharp detail. Slow push in camera motion."],"color":"#232","bgcolor":"#353","title":"Scene Positive Prompt (Wan2.2)"},
+
+    {"id":40,"type":"CLIPTextEncode","pos":[1000,1760],"size":[550,160],"flags":{},"order":40,"mode":0,"inputs":[{"name":"clip","type":"CLIP","link":48}],"outputs":[{"name":"CONDITIONING","type":"CONDITIONING","links":[58,59,60,61],"slot_index":0}],"properties":{"Node name for S&R":"CLIPTextEncode"},"widgets_values":["色调艳丽，过曝，静态，细节模糊不清，字幕，最差质量，低质量，frozen pose, no movement, static character, dim lighting, hazy, foggy, washed out, desaturated, watermark"],"color":"#322","bgcolor":"#533","title":"Scene Negative Prompt (Wan2.2)"},
+
+    {"id":41,"type":"WanImageToVideo","pos":[1650,1500],"size":[380,320],"flags":{},"order":44,"mode":0,"inputs":[{"name":"positive","type":"CONDITIONING","link":54},{"name":"negative","type":"CONDITIONING","link":58},{"name":"vae","type":"VAE","link":49},{"name":"clip_vision_output","type":"CLIP_VISION_OUTPUT","link":null,"shape":7},{"name":"start_image","type":"IMAGE","link":38}],"outputs":[{"name":"positive","type":"CONDITIONING","links":[62,63,64,65],"slot_index":0},{"name":"negative","type":"CONDITIONING","links":[66,67,68,69],"slot_index":1},{"name":"latent","type":"LATENT","links":[70],"slot_index":2}],"properties":{"Node name for S&R":"WanImageToVideo"},"widgets_values":[832,480,81,1],"title":"Wan I2V Conditioning (S-08 Segment 1)"},
+
+    {"id":42,"type":"ModelSamplingSD3","pos":[1050,1500],"size":[280,110],"flags":{},"order":41,"mode":0,"inputs":[{"name":"model","type":"MODEL","link":43}],"outputs":[{"name":"MODEL","type":"MODEL","links":[71],"slot_index":0}],"properties":{"Node name for S&R":"ModelSamplingSD3"},"widgets_values":[5.0],"title":"Sigma Shift HIGH (5.0 I2V)"},
+
+    {"id":43,"type":"ModelSamplingSD3","pos":[1050,1660],"size":[280,110],"flags":{},"order":42,"mode":0,"inputs":[{"name":"model","type":"MODEL","link":45}],"outputs":[{"name":"MODEL","type":"MODEL","links":[72],"slot_index":0}],"properties":{"Node name for S&R":"ModelSamplingSD3"},"widgets_values":[5.0],"title":"Sigma Shift LOW (5.0 I2V)"},
+
+    {"id":44,"type":"KSamplerAdvanced","pos":[2100,1500],"size":[320,530],"flags":{},"order":47,"mode":0,"inputs":[{"name":"model","type":"MODEL","link":71},{"name":"positive","type":"CONDITIONING","link":62},{"name":"negative","type":"CONDITIONING","link":66},{"name":"latent_image","type":"LATENT","link":70}],"outputs":[{"name":"LATENT","type":"LATENT","links":[73],"slot_index":0}],"properties":{"Node name for S&R":"KSamplerAdvanced"},"widgets_values":["enable",42,"fixed",50,7.0,"euler","simple",0,25,"enable"],"title":"S-08 HIGH Noise Pass (steps 0-25)"},
+
+    {"id":45,"type":"KSamplerAdvanced","pos":[2480,1500],"size":[320,530],"flags":{},"order":48,"mode":0,"inputs":[{"name":"model","type":"MODEL","link":72},{"name":"positive","type":"CONDITIONING","link":63},{"name":"negative","type":"CONDITIONING","link":67},{"name":"latent_image","type":"LATENT","link":73}],"outputs":[{"name":"LATENT","type":"LATENT","links":[74,75],"slot_index":0}],"properties":{"Node name for S&R":"KSamplerAdvanced"},"widgets_values":["disable",0,"fixed",50,7.0,"euler","simple",25,50,"disable"],"title":"S-08 LOW Noise Pass (steps 25-50)"},
+
+    {"id":46,"type":"VAEDecode","pos":[2860,1500],"size":[230,100],"flags":{},"order":49,"mode":0,"inputs":[{"name":"samples","type":"LATENT","link":74},{"name":"vae","type":"VAE","link":50}],"outputs":[{"name":"IMAGE","type":"IMAGE","links":[76,96],"slot_index":0}],"properties":{"Node name for S&R":"VAEDecode"},"widgets_values":[],"title":"VAE Decode S-08 Seg1"},
+
+    {"id":47,"type":"CreateVideo","pos":[3140,1500],"size":[280,130],"flags":{},"order":50,"mode":0,"inputs":[{"name":"images","type":"IMAGE","link":76},{"name":"audio","type":"AUDIO","link":null,"shape":7}],"outputs":[{"name":"VIDEO","type":"VIDEO","links":[77],"slot_index":0}],"properties":{"Node name for S&R":"CreateVideo"},"widgets_values":[15],"title":"Create Video Seg1"},
+
+    {"id":48,"type":"SaveVideo","pos":[3480,1500],"size":[320,130],"flags":{},"order":51,"mode":0,"inputs":[{"name":"video","type":"VIDEO","link":77}],"outputs":[],"properties":{"Node name for S&R":"SaveVideo"},"widgets_values":["segment_001","auto","auto"],"title":"Save segment_001.mp4"},
+
+    {"id":49,"type":"PauseWorkflowNode","pos":[3480,1680],"size":[320,100],"flags":{},"order":52,"mode":0,"inputs":[],"outputs":[],"properties":{"Node name for S&R":"PauseWorkflowNode"},"widgets_values":[],"title":"⏸ HRG-8 Preview: Review Segment 1"},
+
+    {"id":50,"type":"VAEEncode","pos":[1650,1900],"size":[280,110],"flags":{},"order":45,"mode":0,"inputs":[{"name":"pixels","type":"IMAGE","link":39},{"name":"vae","type":"VAE","link":51}],"outputs":[{"name":"LATENT","type":"LATENT","links":[78,79,80],"slot_index":0}],"properties":{"Node name for S&R":"VAEEncode"},"widgets_values":[],"title":"Anchor Samples (Refined Char — Identity Lock)"},
+
+    {"id":51,"type":"VAEEncode","pos":[1650,2060],"size":[280,110],"flags":{},"order":46,"mode":0,"inputs":[{"name":"pixels","type":"IMAGE","link":2},{"name":"vae","type":"VAE","link":52}],"outputs":[{"name":"LATENT","type":"LATENT","links":[81,82,83],"slot_index":0}],"properties":{"Node name for S&R":"VAEEncode"},"widgets_values":[],"title":"End Samples (FLF2V End Frame Target)"},
+
+    {"id":52,"type":"ModelSamplingSD3","pos":[1050,1860],"size":[280,110],"flags":{},"order":43,"mode":0,"inputs":[{"name":"model","type":"MODEL","link":44}],"outputs":[{"name":"MODEL","type":"MODEL","links":[84,85,86],"slot_index":0}],"properties":{"Node name for S&R":"ModelSamplingSD3"},"widgets_values":[7.0],"title":"Sigma Shift HIGH (7.0 SVI continuation)"},
+
+    {"id":53,"type":"ModelSamplingSD3","pos":[1050,2020],"size":[280,110],"flags":{},"order":43,"mode":0,"inputs":[{"name":"model","type":"MODEL","link":46}],"outputs":[{"name":"MODEL","type":"MODEL","links":[87,88,89],"slot_index":0}],"properties":{"Node name for S&R":"ModelSamplingSD3"},"widgets_values":[7.0],"title":"Sigma Shift LOW (7.0 SVI continuation)"},
+
+    {"id":54,"type":"WanImageToVideoSVIProFLF","pos":[2100,2000],"size":[380,300],"flags":{},"order":53,"mode":0,"inputs":[{"name":"positive","type":"CONDITIONING","link":55},{"name":"negative","type":"CONDITIONING","link":59},{"name":"prev_samples","type":"LATENT","link":75},{"name":"anchor_samples","type":"LATENT","link":78},{"name":"end_samples","type":"LATENT","link":81}],"outputs":[{"name":"positive","type":"CONDITIONING","links":[90],"slot_index":0},{"name":"negative","type":"CONDITIONING","links":[91],"slot_index":1},{"name":"latent","type":"LATENT","links":[92],"slot_index":2}],"properties":{"Node name for S&R":"WanImageToVideoSVIProFLF"},"widgets_values":[81,4],"title":"SVI Pro FLF — Segment 2 Conditioning"},
+
+    {"id":55,"type":"KSamplerAdvanced","pos":[2540,2000],"size":[320,530],"flags":{},"order":54,"mode":0,"inputs":[{"name":"model","type":"MODEL","link":84},{"name":"positive","type":"CONDITIONING","link":90},{"name":"negative","type":"CONDITIONING","link":91},{"name":"latent_image","type":"LATENT","link":92}],"outputs":[{"name":"LATENT","type":"LATENT","links":[93],"slot_index":0}],"properties":{"Node name for S&R":"KSamplerAdvanced"},"widgets_values":["enable",43,"fixed",50,7.0,"euler","simple",0,25,"enable"],"title":"Seg2 HIGH Noise (steps 0-25, sigma=7.0)"},
+
+    {"id":56,"type":"KSamplerAdvanced","pos":[2920,2000],"size":[320,530],"flags":{},"order":55,"mode":0,"inputs":[{"name":"model","type":"MODEL","link":87},{"name":"positive","type":"CONDITIONING","link":90},{"name":"negative","type":"CONDITIONING","link":91},{"name":"latent_image","type":"LATENT","link":93}],"outputs":[{"name":"LATENT","type":"LATENT","links":[94,95],"slot_index":0}],"properties":{"Node name for S&R":"KSamplerAdvanced"},"widgets_values":["disable",0,"fixed",50,7.0,"euler","simple",25,50,"disable"],"title":"Seg2 LOW Noise (steps 25-50)"},
+
+    {"id":57,"type":"WanCutLastSlot","pos":[3300,2000],"size":[280,110],"flags":{},"order":56,"mode":0,"inputs":[{"name":"latents","type":"LATENT","link":94}],"outputs":[{"name":"trimmed_latents","type":"LATENT","links":[99],"slot_index":0}],"properties":{"Node name for S&R":"WanCutLastSlot"},"widgets_values":[1],"title":"WanCutLastSlot Seg2 (trim FLF2V tail)"},
+
+    {"id":58,"type":"VAEDecode","pos":[3300,2160],"size":[230,100],"flags":{},"order":57,"mode":0,"inputs":[{"name":"samples","type":"LATENT","link":95},{"name":"vae","type":"VAE","link":53}],"outputs":[{"name":"IMAGE","type":"IMAGE","links":[97,107],"slot_index":0}],"properties":{"Node name for S&R":"VAEDecode"},"widgets_values":[],"title":"VAE Decode Seg2"},
+
+    {"id":59,"type":"CreateVideo","pos":[3600,2000],"size":[280,130],"flags":{},"order":58,"mode":0,"inputs":[{"name":"images","type":"IMAGE","link":97},{"name":"audio","type":"AUDIO","link":null,"shape":7}],"outputs":[{"name":"VIDEO","type":"VIDEO","links":[98],"slot_index":0}],"properties":{"Node name for S&R":"CreateVideo"},"widgets_values":[15],"title":"Create Video Seg2"},
+
+    {"id":60,"type":"SaveVideo","pos":[3940,2000],"size":[320,130],"flags":{},"order":59,"mode":0,"inputs":[{"name":"video","type":"VIDEO","link":98}],"outputs":[],"properties":{"Node name for S&R":"SaveVideo"},"widgets_values":["segment_002","auto","auto"],"title":"Save segment_002.mp4"},
+
+    {"id":61,"type":"WanImageToVideoSVIProFLF","pos":[2100,2700],"size":[380,300],"flags":{},"order":60,"mode":0,"inputs":[{"name":"positive","type":"CONDITIONING","link":56},{"name":"negative","type":"CONDITIONING","link":60},{"name":"prev_samples","type":"LATENT","link":99},{"name":"anchor_samples","type":"LATENT","link":79},{"name":"end_samples","type":"LATENT","link":82}],"outputs":[{"name":"positive","type":"CONDITIONING","links":[100],"slot_index":0},{"name":"negative","type":"CONDITIONING","links":[101],"slot_index":1},{"name":"latent","type":"LATENT","links":[102],"slot_index":2}],"properties":{"Node name for S&R":"WanImageToVideoSVIProFLF"},"widgets_values":[81,4],"title":"SVI Pro FLF — Segment 3 Conditioning"},
+
+    {"id":62,"type":"KSamplerAdvanced","pos":[2540,2700],"size":[320,530],"flags":{},"order":61,"mode":0,"inputs":[{"name":"model","type":"MODEL","link":85},{"name":"positive","type":"CONDITIONING","link":100},{"name":"negative","type":"CONDITIONING","link":101},{"name":"latent_image","type":"LATENT","link":102}],"outputs":[{"name":"LATENT","type":"LATENT","links":[103],"slot_index":0}],"properties":{"Node name for S&R":"KSamplerAdvanced"},"widgets_values":["enable",44,"fixed",50,7.0,"euler","simple",0,25,"enable"],"title":"Seg3 HIGH Noise"},
+
+    {"id":63,"type":"KSamplerAdvanced","pos":[2920,2700],"size":[320,530],"flags":{},"order":62,"mode":0,"inputs":[{"name":"model","type":"MODEL","link":88},{"name":"positive","type":"CONDITIONING","link":100},{"name":"negative","type":"CONDITIONING","link":101},{"name":"latent_image","type":"LATENT","link":103}],"outputs":[{"name":"LATENT","type":"LATENT","links":[104,105],"slot_index":0}],"properties":{"Node name for S&R":"KSamplerAdvanced"},"widgets_values":["disable",0,"fixed",50,7.0,"euler","simple",25,50,"disable"],"title":"Seg3 LOW Noise"},
+
+    {"id":64,"type":"WanCutLastSlot","pos":[3300,2700],"size":[280,110],"flags":{},"order":63,"mode":0,"inputs":[{"name":"latents","type":"LATENT","link":104}],"outputs":[{"name":"trimmed_latents","type":"LATENT","links":[109],"slot_index":0}],"properties":{"Node name for S&R":"WanCutLastSlot"},"widgets_values":[1],"title":"WanCutLastSlot Seg3"},
+
+    {"id":65,"type":"VAEDecode","pos":[3300,2860],"size":[230,100],"flags":{},"order":64,"mode":0,"inputs":[{"name":"samples","type":"LATENT","link":105},{"name":"vae","type":"VAE","link":53}],"outputs":[{"name":"IMAGE","type":"IMAGE","links":[106],"slot_index":0}],"properties":{"Node name for S&R":"VAEDecode"},"widgets_values":[],"title":"VAE Decode Seg3"},
+
+    {"id":66,"type":"CreateVideo","pos":[3600,2700],"size":[280,130],"flags":{},"order":65,"mode":0,"inputs":[{"name":"images","type":"IMAGE","link":106},{"name":"audio","type":"AUDIO","link":null,"shape":7}],"outputs":[{"name":"VIDEO","type":"VIDEO","links":[108],"slot_index":0}],"properties":{"Node name for S&R":"CreateVideo"},"widgets_values":[15],"title":"Create Video Seg3"},
+
+    {"id":67,"type":"SaveVideo","pos":[3940,2700],"size":[320,130],"flags":{},"order":66,"mode":0,"inputs":[{"name":"video","type":"VIDEO","link":108}],"outputs":[],"properties":{"Node name for S&R":"SaveVideo"},"widgets_values":["segment_003","auto","auto"],"title":"Save segment_003.mp4"},
+
+    {"id":68,"type":"WanImageToVideoSVIProFLF","pos":[2100,3400],"size":[380,300],"flags":{},"order":67,"mode":0,"inputs":[{"name":"positive","type":"CONDITIONING","link":57},{"name":"negative","type":"CONDITIONING","link":61},{"name":"prev_samples","type":"LATENT","link":109},{"name":"anchor_samples","type":"LATENT","link":80},{"name":"end_samples","type":"LATENT","link":83}],"outputs":[{"name":"positive","type":"CONDITIONING","links":[110],"slot_index":0},{"name":"negative","type":"CONDITIONING","links":[111],"slot_index":1},{"name":"latent","type":"LATENT","links":[112],"slot_index":2}],"properties":{"Node name for S&R":"WanImageToVideoSVIProFLF"},"widgets_values":[81,4],"title":"SVI Pro FLF — Segment 4 Conditioning"},
+
+    {"id":69,"type":"KSamplerAdvanced","pos":[2540,3400],"size":[320,530],"flags":{},"order":68,"mode":0,"inputs":[{"name":"model","type":"MODEL","link":86},{"name":"positive","type":"CONDITIONING","link":110},{"name":"negative","type":"CONDITIONING","link":111},{"name":"latent_image","type":"LATENT","link":112}],"outputs":[{"name":"LATENT","type":"LATENT","links":[113],"slot_index":0}],"properties":{"Node name for S&R":"KSamplerAdvanced"},"widgets_values":["enable",45,"fixed",50,7.0,"euler","simple",0,25,"enable"],"title":"Seg4 HIGH Noise"},
+
+    {"id":70,"type":"KSamplerAdvanced","pos":[2920,3400],"size":[320,530],"flags":{},"order":69,"mode":0,"inputs":[{"name":"model","type":"MODEL","link":89},{"name":"positive","type":"CONDITIONING","link":110},{"name":"negative","type":"CONDITIONING","link":111},{"name":"latent_image","type":"LATENT","link":113}],"outputs":[{"name":"LATENT","type":"LATENT","links":[114],"slot_index":0}],"properties":{"Node name for S&R":"KSamplerAdvanced"},"widgets_values":["disable",0,"fixed",50,7.0,"euler","simple",25,50,"disable"],"title":"Seg4 LOW Noise"},
+
+    {"id":71,"type":"VAEDecode","pos":[3300,3400],"size":[230,100],"flags":{},"order":70,"mode":0,"inputs":[{"name":"samples","type":"LATENT","link":114},{"name":"vae","type":"VAE","link":53}],"outputs":[{"name":"IMAGE","type":"IMAGE","links":[115],"slot_index":0}],"properties":{"Node name for S&R":"VAEDecode"},"widgets_values":[],"title":"VAE Decode Seg4"},
+
+    {"id":72,"type":"CreateVideo","pos":[3600,3400],"size":[280,130],"flags":{},"order":71,"mode":0,"inputs":[{"name":"images","type":"IMAGE","link":115},{"name":"audio","type":"AUDIO","link":null,"shape":7}],"outputs":[{"name":"VIDEO","type":"VIDEO","links":[116],"slot_index":0}],"properties":{"Node name for S&R":"CreateVideo"},"widgets_values":[15],"title":"Create Video Seg4"},
+
+    {"id":73,"type":"SaveVideo","pos":[3940,3400],"size":[320,130],"flags":{},"order":72,"mode":0,"inputs":[{"name":"video","type":"VIDEO","link":116}],"outputs":[],"properties":{"Node name for S&R":"SaveVideo"},"widgets_values":["segment_004","auto","auto"],"title":"Save segment_004.mp4"},
+
+    {"id":74,"type":"PauseWorkflowNode","pos":[3940,3580],"size":[420,100],"flags":{},"order":73,"mode":0,"inputs":[],"outputs":[],"properties":{"Node name for S&R":"PauseWorkflowNode"},"widgets_values":[],"title":"⏸ HRG-8 FULL: Review all 4 video segments before audio"},
+
+    {"id":75,"type":"CosyVoiceNode","pos":[4500,1500],"size":[380,200],"flags":{},"order":74,"mode":0,"inputs":[],"outputs":[{"name":"AUDIO","type":"AUDIO","links":[117],"slot_index":0}],"properties":{"Node name for S&R":"CosyVoiceNode"},"widgets_values":["Your character's dialogue goes here. Edit this text with the actual script lines from Stage S-01.","instruct","en"],"title":"S-11 CosyVoice3 TTS Dialogue"},
+
+    {"id":76,"type":"PauseWorkflowNode","pos":[4500,1750],"size":[380,100],"flags":{},"order":75,"mode":0,"inputs":[],"outputs":[],"properties":{"Node name for S&R":"PauseWorkflowNode"},"widgets_values":[],"title":"⏸ HRG-9: Listen to dialogue audio before lip sync"},
+
+    {"id":77,"type":"VideoLengthAdjuster","pos":[4500,1900],"size":[380,200],"flags":{},"order":76,"mode":0,"inputs":[{"name":"images","type":"IMAGE","link":96},{"name":"audio","type":"AUDIO","link":117}],"outputs":[{"name":"images","type":"IMAGE","links":[118],"slot_index":0},{"name":"audio","type":"AUDIO","links":[119],"slot_index":1}],"properties":{"Node name for S&R":"VideoLengthAdjuster"},"widgets_values":["normal",15,0.5],"title":"S-12 Video Length Adjuster (match audio duration)"},
+
+    {"id":78,"type":"LatentSyncNode","pos":[4500,2160],"size":[380,200],"flags":{},"order":77,"mode":0,"inputs":[{"name":"images","type":"IMAGE","link":118},{"name":"audio","type":"AUDIO","link":119}],"outputs":[{"name":"images","type":"IMAGE","links":[120],"slot_index":0},{"name":"audio","type":"AUDIO","links":null,"slot_index":1}],"properties":{"Node name for S&R":"LatentSyncNode"},"widgets_values":[42,1.5,20],"title":"S-12 LatentSync 1.6 Lip Sync"},
+
+    {"id":79,"type":"CreateVideo","pos":[4940,2160],"size":[280,130],"flags":{},"order":78,"mode":0,"inputs":[{"name":"images","type":"IMAGE","link":120},{"name":"audio","type":"AUDIO","link":null,"shape":7}],"outputs":[{"name":"VIDEO","type":"VIDEO","links":[121],"slot_index":0}],"properties":{"Node name for S&R":"CreateVideo"},"widgets_values":[15],"title":"Create Lip Synced Video"},
+
+    {"id":80,"type":"SaveVideo","pos":[5280,2160],"size":[320,130],"flags":{},"order":79,"mode":0,"inputs":[{"name":"video","type":"VIDEO","link":121}],"outputs":[],"properties":{"Node name for S&R":"SaveVideo"},"widgets_values":["lip_synced","auto","auto"],"title":"Save lip_synced.mp4"},
+
+    {"id":81,"type":"PauseWorkflowNode","pos":[5280,2340],"size":[380,100],"flags":{},"order":80,"mode":0,"inputs":[],"outputs":[],"properties":{"Node name for S&R":"PauseWorkflowNode"},"widgets_values":[],"title":"⏸ HRG-10: Review lip sync quality"},
+
+    {"id":82,"type":"MMAudioModelLoader","pos":[4500,2700],"size":[380,120],"flags":{},"order":81,"mode":0,"inputs":[],"outputs":[{"name":"mmaudio_model","type":"MMAUDIO_MODEL","links":[122],"slot_index":0}],"properties":{"Node name for S&R":"MMAudioModelLoader"},"widgets_values":["medium_44k","fp16"],"title":"S-13 MMAudio Model (medium_44k)"},
+
+    {"id":83,"type":"MMAudioFeatureUtilsLoader","pos":[4500,2870],"size":[380,100],"flags":{},"order":82,"mode":0,"inputs":[],"outputs":[{"name":"feature_utils","type":"MMAUDIO_FEATURE_UTILS","links":[123],"slot_index":0}],"properties":{"Node name for S&R":"MMAudioFeatureUtilsLoader"},"widgets_values":[],"title":"MMAudio Feature Utils"},
+
+    {"id":84,"type":"MMAudioVoCoderLoader","pos":[4500,3010],"size":[380,100],"flags":{},"order":83,"mode":0,"inputs":[],"outputs":[{"name":"vocoder","type":"MMAUDIO_VOCODER","links":[124],"slot_index":0}],"properties":{"Node name for S&R":"MMAudioVoCoderLoader"},"widgets_values":[],"title":"MMAudio Vocoder"},
+
+    {"id":85,"type":"MMAudioSampler","pos":[4940,2700],"size":[420,320],"flags":{},"order":84,"mode":0,"inputs":[{"name":"mmaudio_model","type":"MMAUDIO_MODEL","link":122},{"name":"feature_utils","type":"MMAUDIO_FEATURE_UTILS","link":123},{"name":"vocoder","type":"MMAUDIO_VOCODER","link":124},{"name":"images","type":"IMAGE","link":107}],"outputs":[{"name":"audio","type":"AUDIO","links":[],"slot_index":0}],"properties":{"Node name for S&R":"MMAudioSampler"},"widgets_values":["ambient sound, environment, background noise, natural atmosphere",""  ,5.0,25,4.5,42,false],"title":"S-13 MMAudio Ambient Sound Generator"},
+
+    {"id":86,"type":"MusicgenHFGenerate","pos":[4500,3200],"size":[420,280],"flags":{},"order":85,"mode":0,"inputs":[],"outputs":[{"name":"audio","type":"RAW_AUDIO","links":[],"slot_index":0}],"properties":{"Node name for S&R":"MusicgenHFGenerate"},"widgets_values":["facebook/musicgen-medium",null,"inspiring motivational cinematic orchestral music, uplifting strings and piano, emotional journey, triumph over adversity",1,20.0,3.0,50,0.9,1.0,42,null],"title":"S-14 MusicGen Music (edit text prompt for mood)"},
+
+    {"id":87,"type":"PauseWorkflowNode","pos":[5400,3000],"size":[380,100],"flags":{},"order":86,"mode":0,"inputs":[],"outputs":[],"properties":{"Node name for S&R":"PauseWorkflowNode"},"widgets_values":[],"title":"⏸ HRG-11: Final audio review — SNR, mix levels, clipping check"}
+
+  ],
+
+  "links": [
+    [1, 2, 0, 8, 2, "IMAGE"],
+    [2, 3, 0, 51, 0, "IMAGE"],
+    [3, 4, 0, 9, 0, "CLIP"],
+    [4, 4, 0, 10, 0, "CLIP"],
+    [5, 4, 0, 19, 0, "CLIP"],
+    [6, 5, 0, 8, 0, "MODEL"],
+    [7, 5, 0, 17, 0, "MODEL"],
+    [8, 6, 0, 14, 1, "VAE"],
+    [9, 6, 0, 18, 1, "VAE"],
+    [10, 6, 0, 20, 1, "VAE"],
+    [11, 7, 0, 8, 1, "IPADAPTER"],
+    [12, 8, 0, 13, 0, "MODEL"],
+    [13, 9, 0, 11, 0, "CONDITIONING"],
+    [14, 10, 0, 13, 2, "CONDITIONING"],
+    [15, 10, 0, 19, 2, "CONDITIONING"],
+    [16, 11, 0, 13, 1, "CONDITIONING"],
+    [17, 11, 0, 19, 1, "CONDITIONING"],
+    [18, 12, 0, 13, 3, "LATENT"],
+    [19, 13, 0, 14, 0, "LATENT"],
+    [20, 14, 0, 15, 0, "IMAGE"],
+    [21, 14, 0, 18, 0, "IMAGE"],
+    [22, 17, 0, 19, 0, "MODEL"],
+    [23, 18, 0, 19, 3, "LATENT"],
+    [24, 19, 0, 20, 0, "LATENT"],
+    [25, 20, 0, 21, 0, "IMAGE"],
+    [26, 20, 0, 28, 0, "IMAGE"],
+    [27, 20, 0, 50, 0, "IMAGE"],
+    [28, 23, 0, 29, 0, "MODEL"],
+    [29, 24, 0, 26, 0, "CLIP"],
+    [30, 24, 0, 27, 0, "CLIP"],
+    [31, 25, 0, 28, 1, "VAE"],
+    [32, 25, 0, 30, 1, "VAE"],
+    [33, 26, 0, 29, 1, "CONDITIONING"],
+    [34, 27, 0, 29, 2, "CONDITIONING"],
+    [35, 28, 0, 29, 3, "LATENT"],
+    [36, 29, 0, 30, 0, "LATENT"],
+    [37, 30, 0, 31, 0, "IMAGE"],
+    [38, 30, 0, 41, 4, "IMAGE"],
+    [39, 30, 0, 50, 0, "IMAGE"],
+    [40, 30, 0, 77, 0, "IMAGE"],
+    [41, 33, 0, 35, 0, "MODEL"],
+    [42, 34, 0, 36, 0, "MODEL"],
+    [43, 35, 0, 42, 0, "MODEL"],
+    [44, 35, 0, 52, 0, "MODEL"],
+    [45, 36, 0, 43, 0, "MODEL"],
+    [46, 36, 0, 53, 0, "MODEL"],
+    [47, 37, 0, 39, 0, "CLIP"],
+    [48, 37, 0, 40, 0, "CLIP"],
+    [49, 38, 0, 41, 2, "VAE"],
+    [50, 38, 0, 46, 1, "VAE"],
+    [51, 38, 0, 50, 1, "VAE"],
+    [52, 38, 0, 51, 1, "VAE"],
+    [53, 38, 0, 58, 1, "VAE"],
+    [54, 39, 0, 41, 0, "CONDITIONING"],
+    [55, 39, 0, 54, 0, "CONDITIONING"],
+    [56, 39, 0, 61, 0, "CONDITIONING"],
+    [57, 39, 0, 68, 0, "CONDITIONING"],
+    [58, 40, 0, 41, 1, "CONDITIONING"],
+    [59, 40, 0, 54, 1, "CONDITIONING"],
+    [60, 40, 0, 61, 1, "CONDITIONING"],
+    [61, 40, 0, 68, 1, "CONDITIONING"],
+    [62, 41, 0, 44, 1, "CONDITIONING"],
+    [63, 41, 0, 45, 1, "CONDITIONING"],
+    [64, 41, 0, 45, 1, "CONDITIONING"],
+    [65, 41, 0, 45, 1, "CONDITIONING"],
+    [66, 41, 1, 44, 2, "CONDITIONING"],
+    [67, 41, 1, 45, 2, "CONDITIONING"],
+    [68, 41, 1, 45, 2, "CONDITIONING"],
+    [69, 41, 1, 45, 2, "CONDITIONING"],
+    [70, 41, 2, 44, 3, "LATENT"],
+    [71, 42, 0, 44, 0, "MODEL"],
+    [72, 43, 0, 45, 0, "MODEL"],
+    [73, 44, 0, 45, 3, "LATENT"],
+    [74, 45, 0, 46, 0, "LATENT"],
+    [75, 45, 0, 54, 2, "LATENT"],
+    [76, 46, 0, 47, 0, "IMAGE"],
+    [77, 47, 0, 48, 0, "VIDEO"],
+    [78, 50, 0, 54, 3, "LATENT"],
+    [79, 50, 0, 61, 3, "LATENT"],
+    [80, 50, 0, 68, 3, "LATENT"],
+    [81, 51, 0, 54, 4, "LATENT"],
+    [82, 51, 0, 61, 4, "LATENT"],
+    [83, 51, 0, 68, 4, "LATENT"],
+    [84, 52, 0, 55, 0, "MODEL"],
+    [85, 52, 0, 62, 0, "MODEL"],
+    [86, 52, 0, 69, 0, "MODEL"],
+    [87, 53, 0, 56, 0, "MODEL"],
+    [88, 53, 0, 63, 0, "MODEL"],
+    [89, 53, 0, 70, 0, "MODEL"],
+    [90, 54, 0, 55, 1, "CONDITIONING"],
+    [91, 54, 1, 55, 2, "CONDITIONING"],
+    [92, 54, 2, 55, 3, "LATENT"],
+    [93, 55, 0, 56, 3, "LATENT"],
+    [94, 56, 0, 57, 0, "LATENT"],
+    [95, 56, 0, 58, 0, "LATENT"],
+    [96, 46, 0, 77, 0, "IMAGE"],
+    [97, 58, 0, 59, 0, "IMAGE"],
+    [98, 59, 0, 60, 0, "VIDEO"],
+    [99, 57, 0, 61, 2, "LATENT"],
+    [100, 61, 0, 62, 1, "CONDITIONING"],
+    [101, 61, 1, 62, 2, "CONDITIONING"],
+    [102, 61, 2, 62, 3, "LATENT"],
+    [103, 62, 0, 63, 3, "LATENT"],
+    [104, 63, 0, 64, 0, "LATENT"],
+    [105, 63, 0, 65, 0, "LATENT"],
+    [106, 65, 0, 66, 0, "IMAGE"],
+    [107, 58, 0, 85, 3, "IMAGE"],
+    [108, 66, 0, 67, 0, "VIDEO"],
+    [109, 64, 0, 68, 2, "LATENT"],
+    [110, 68, 0, 69, 1, "CONDITIONING"],
+    [111, 68, 1, 69, 2, "CONDITIONING"],
+    [112, 68, 2, 69, 3, "LATENT"],
+    [113, 69, 0, 70, 3, "LATENT"],
+    [114, 70, 0, 71, 0, "LATENT"],
+    [115, 71, 0, 72, 0, "IMAGE"],
+    [116, 72, 0, 73, 0, "VIDEO"],
+    [117, 75, 0, 77, 1, "AUDIO"],
+    [118, 77, 0, 78, 0, "IMAGE"],
+    [119, 77, 1, 78, 1, "AUDIO"],
+    [120, 78, 0, 79, 0, "IMAGE"],
+    [121, 79, 0, 80, 0, "VIDEO"],
+    [122, 82, 0, 85, 0, "MMAUDIO_MODEL"],
+    [123, 83, 0, 85, 1, "MMAUDIO_FEATURE_UTILS"],
+    [124, 84, 0, 85, 2, "MMAUDIO_VOCODER"]
+  ],
+
+  "groups": [
+    {"id":1,"title":"INPUTS — Load reference images here","bounding":[30,380,380,760],"color":"#3d5a3e","font_size":18,"flags":{}},
+    {"id":2,"title":"S-05: FLUX.2-klein Base Image Generation","bounding":[580,-30,2000,500],"color":"#3f789e","font_size":18,"flags":{}},
+    {"id":3,"title":"S-06: Identity LoRA Reinforcement (img2img)","bounding":[580,570,2000,480],"color":"#3f789e","font_size":18,"flags":{}},
+    {"id":4,"title":"S-07: Z-Image-Turbo Refinement (identity frozen after this)","bounding":[580,850,2800,450],"color":"#6b3fa0","font_size":18,"flags":{}},
+    {"id":5,"title":"S-08: Wan2.2 I2V — Segment 1 (dual KSamplerAdvanced, sigma=5.0)","bounding":[80,1460,4200,450],"color":"#7e4a1a","font_size":18,"flags":{}},
+    {"id":6,"title":"S-09: SVI 2.0 Pro — Segment 2 (sigma=7.0, FLF2V enabled)","bounding":[2080,1950,2200,500],"color":"#1a4a7e","font_size":18,"flags":{}},
+    {"id":7,"title":"S-09: SVI 2.0 Pro — Segment 3","bounding":[2080,2650,2200,500],"color":"#1a4a7e","font_size":18,"flags":{}},
+    {"id":8,"title":"S-09: SVI 2.0 Pro — Segment 4","bounding":[2080,3350,2200,500],"color":"#1a4a7e","font_size":18,"flags":{}},
+    {"id":9,"title":"S-11/S-12: TTS Dialogue + LatentSync Lip Sync","bounding":[4470,1460,1250,1050],"color":"#3d5a3e","font_size":18,"flags":{}},
+    {"id":10,"title":"S-13: MMAudio Ambient Sound","bounding":[4470,2650,950,500],"color":"#3d5a3e","font_size":18,"flags":{}},
+    {"id":11,"title":"S-14: MusicGen Background Music","bounding":[4470,3150,950,350],"color":"#3d5a3e","font_size":18,"flags":{}}
+  ],
+
+  "config": {},
+  "extra": {
+    "ds": {"scale": 0.35, "offset": [0, 0]},
+    "frontendVersion": "1.42.10"
+  },
+  "version": 0.4
+}

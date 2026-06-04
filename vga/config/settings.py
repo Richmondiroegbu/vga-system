@@ -78,11 +78,18 @@ class VGASettings(BaseSettings):
     # fresh subprocess (saves 3-5 min cold load per segment).
     SVI_SERVER_PORT: int = 8765
 
-    # GPU-resident DiT mode: keeps both FP8 DiTs (28GB) on GPU VRAM instead of
-    # offloading each block to CPU between timesteps. Requires >33GB VRAM:
-    # T5(4.4GB) + DiT-high(14.3GB) + DiT-low(14.3GB) = 33GB. RTX 5090 32GB
-    # cannot fit all three simultaneously. Disabled on 32GB pods.
-    SVI_GPU_RESIDENT_DITS: bool = False
+    # GPU-resident DiT mode: keeps both DiTs on GPU VRAM instead of offloading.
+    # RTX PRO 6000 96GB + BF16: T5(9.3GB) + DiT-high(~15GB) + DiT-low(~15GB) = ~39GB.
+    # All models fit GPU-resident — no CPU offloading required.
+    SVI_GPU_RESIDENT_DITS: bool = True
+
+    # === Wan2.2 BF16 Base Model (RTX PRO 6000 upgrade) ===
+    # Full BF16 precision — eliminates FP8 quantization artifacts, better temporal coherence.
+    # Download: huggingface-cli download Wan-AI/Wan2.2-I2V-A14B --local-dir /workspace/models/wan22_bf16
+    WAN22_BF16_MODEL_PATH: Path = Path("/workspace/models/wan22_bf16")
+    # "bf16" = WAN22_BF16_MODEL_PATH, standard BF16 loader, no apply_vram_management (RTX PRO 6000).
+    # "fp8" = WAN22_MODEL_PATH, custom FP8 split-block loader (legacy 32GB path).
+    SVI_WAN22_PRECISION: str = "bf16"
 
     # === Identity Thresholds ===
     CLIP_IDENTITY_THRESHOLD: float = 0.93        # RULE-92: minimum CLIP score everywhere
@@ -104,8 +111,8 @@ class VGASettings(BaseSettings):
     SVI_CFG_MIN: float = 5.0
     SVI_CFG_MAX: float = 8.0   # raised from 6.0; vita-epfl recommends 7.0 for non-distill SVI
     SVI_CFG_DEFAULT: float = 7.0
-    STEPS_CRITICAL: int = 50     # production quality (increase when ready)
-    STEPS_STANDARD: int = 50    # raised from 30 — sharper SVI output, eliminates softness vs seed frame
+    STEPS_CRITICAL: int = 50     # production quality — keep high for final renders
+    STEPS_STANDARD: int = 30    # reduced from 50; BF16 GPU-resident on RTX PRO 6000 = faster per step
 
     # === SVI LoRA Scheduling (FR-932–FR-934) ===
     LORA_WEIGHT_HIGH_NOISE: float = 0.6          # t > HIGH_NOISE_FRACTION * T

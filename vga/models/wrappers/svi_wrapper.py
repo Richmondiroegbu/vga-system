@@ -185,6 +185,11 @@ class SVIWrapper:
             # and creates motion-steering conflicts at the seam if used as SVI input_video).
             # Value: settings.FLF2V_WANCUT_SLOT_FRAMES (4) when prev had end_frame, else 0.
             "wancut_skip_last": wancut_skip_last,
+            # Precision routing: tells vga_svi_inference.py which model/loader to use.
+            # "bf16" = WAN22_BF16_MODEL_PATH (RTX PRO 6000 96GB, no offloading).
+            # "fp8"  = WAN22_MODEL_PATH (legacy 32GB path with apply_vram_management).
+            "wan22_precision": settings.SVI_WAN22_PRECISION,
+            "wan22_bf16_dir": str(settings.WAN22_BF16_MODEL_PATH),
         }
 
         # ── Path 1: persistent server (avoids cold model loading per segment) ──

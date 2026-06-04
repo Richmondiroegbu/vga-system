@@ -229,12 +229,38 @@ class SceneDescription(BaseModel):
     content: str = ""                  # Qwen variant 3
     emotional_tone: str = "hopeful"
     duration_hint_s: Optional[float] = None
+    # ── Action Density (motion evaluation requirement) ────────────────────────
+    # 4+ specific, coherent physical action beats covering the first ~20 seconds.
+    # Each string = one segment's worth of action (~4-5 seconds).
+    # Used to drive segment action_description fields in S-02 SegmentPlanSchema
+    # and to evaluate how naturally the character moves vs. real human motion.
+    # Required on scene_number == 1 (the opening scene); optional on later scenes.
+    # Format: each string must specify BODY PART + MOVEMENT + EMOTIONAL STATE.
+    # Example: "She walks briskly down the corridor, arms pumping, jaw set — pauses
+    #   abruptly at a door, hand gripping the handle, breath visibly quickening"
+    opening_action_sequence: List[str] = Field(
+        default_factory=list,
+        description="≥4 specific coherent physical action beats, each covering one ~5s segment.",
+    )
 
     @model_validator(mode="after")
     def normalise(self) -> "SceneDescription":
-        """Normalise Qwen's varying field names into standard fields."""
+        """Normalise Qwen's varying field names into standard fields.
+
+        Also warns (non-fatal) when opening_action_sequence is missing on
+        scene 1 — the pipeline continues but S-09 video quality will be harder
+        to evaluate for natural motion drift.
+        """
         if not self.scene_id:
             self.scene_id = f"scene_{self.scene_number:03d}"
+        # Action density: scene 1 should have ≥4 action beats
+        if self.scene_number == 1 and len(self.opening_action_sequence) < 4:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "SceneDescription scene_001: opening_action_sequence has %d items "
+                "(need ≥4 for motion quality evaluation). Script prompt may need re-run.",
+                len(self.opening_action_sequence),
+            )
         # Populate description from any synonym Qwen used
         if not self.description:
             self.description = (

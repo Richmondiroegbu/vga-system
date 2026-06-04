@@ -50,7 +50,8 @@ SVI_REPO = "/workspace/Stable-Video-Infinity"
 if SVI_REPO not in sys.path:
     sys.path.insert(0, SVI_REPO)
 
-WAN22_DIR = "/workspace/models/wan22"
+WAN22_DIR = "/workspace/models/wan22"           # FP8 split-block model (legacy 32GB path)
+WAN22_BF16_DIR = "/workspace/models/wan22_bf16" # BF16 base model (RTX PRO 6000 96GB path)
 
 # Default overlap: 5 frames shared between consecutive segments.
 # Assembly trims the first 5 frames of each continuation segment.
@@ -395,6 +396,69 @@ def apply_vram_management(
     model.vram_management_enabled = True
 
 
+def load_wan_dit_bf16(
+    model_dir: str,
+    noise_level: str,
+    device: str = "cuda",
+) -> "WanModel":
+    """Load Wan2.2-I2V-A14B DiT from BF16 sharded safetensors (RTX PRO 6000 path).
+
+    No FP8 quantization. No apply_vram_management. No CPU offloading.
+    Both DiTs (~15 GB each) + T5 (~9.3 GB) = ~39 GB — fits in 96 GB VRAM.
+
+    noise_level: "high" or "low" — selects high_noise_model/ or low_noise_model/
+    """
+    import glob as _glob
+    from safetensors.torch import load_file as _load_file
+    from diffsynth.models.wan_video_dit import WanModel
+    from diffsynth.core.vram.initialization import skip_model_initialization
+
+    config = {
+        "has_image_input": False,
+        "patch_size": [1, 2, 2],
+        "in_dim": 36,
+        "dim": 5120,
+        "ffn_dim": 13824,
+        "freq_dim": 256,
+        "text_dim": 4096,
+        "out_dim": 16,
+        "num_heads": 40,
+        "num_layers": 40,
+        "eps": 1e-06,
+        "require_clip_embedding": False,
+    }
+
+    noise_dir = Path(model_dir) / f"{noise_level}_noise_model"
+    shard_files = sorted(_glob.glob(str(noise_dir / "diffusion_pytorch_model*.safetensors")))
+    if not shard_files:
+        raise FileNotFoundError(
+            f"No BF16 safetensors shards in {noise_dir}. "
+            f"Run: huggingface-cli download Wan-AI/Wan2.2-I2V-A14B --local-dir {model_dir}"
+        )
+
+    print(f"  Loading {noise_level}_noise DiT BF16 ({len(shard_files)} shard(s))...")
+    state_dict: dict = {}
+    for shard in shard_files:
+        state_dict.update(_load_file(shard, device="cpu"))
+
+    print(f"  Initializing WanModel {noise_level}_noise...")
+    with skip_model_initialization():
+        model = WanModel(**config)
+
+    missing, unexpected = model.load_state_dict(state_dict, strict=False, assign=True)
+    if missing:
+        print(f"  WARNING: {len(missing)} missing keys (first 3): {missing[:3]}")
+    if unexpected:
+        print(f"  WARNING: {len(unexpected)} unexpected keys (first 3): {unexpected[:3]}")
+    del state_dict
+
+    print(f"  Moving {noise_level}_noise DiT → {device} (BF16, GPU-resident)...")
+    model = model.to(dtype=torch.bfloat16, device=device)
+    model = model.eval()
+    print(f"  {noise_level}_noise DiT on {device} BF16 ✓")
+    return model
+
+
 def load_wan_dit_fp8(
     fp8_dir: str,
     device: str = "cuda",
@@ -447,39 +511,83 @@ def load_wan_dit_fp8(
 
 
 def build_pipeline(lora_path_high: str, lora_path_low: str, device: str = "cuda") -> "WanVideoSviPipeline":
-    """Build WanVideoSviPipeline with local FP8 DiTs + BF16 T5/VAE."""
+    """Build WanVideoSviPipeline.
+
+    Precision routing (WAN22_PRECISION env var):
+      "bf16" — BF16 base model from WAN22_BF16_DIR (RTX PRO 6000 96GB path).
+               Both DiTs GPU-resident, no apply_vram_management, T5 on GPU.
+      "fp8"  — FP8 split-block model from WAN22_DIR (legacy 32GB path).
+               apply_vram_management with CPU offload.
+    """
     from diffsynth.pipelines.wan_video_svi import WanVideoSviPipeline
     from diffsynth.core.loader.config import ModelConfig
     from diffsynth.models.wan_video_text_encoder import HuggingfaceTokenizer
 
-    gpu_resident = os.environ.get("SVI_GPU_RESIDENT", "0") != "0"
+    precision = os.environ.get("WAN22_PRECISION", "bf16").lower()
+    bf16_dir = os.environ.get("WAN22_BF16_DIR", "/workspace/models/wan22_bf16")
 
     pipe = WanVideoSviPipeline(device=device, torch_dtype=torch.bfloat16)
 
-    print("Loading T5 text encoder and VAE (offloads to CPU)...")
-    t5_config = ModelConfig(path=f"{WAN22_DIR}/models_t5_umt5-xxl-enc-bf16.pth", offload_device="cpu")
-    vae_config = ModelConfig(path=f"{WAN22_DIR}/Wan2.1_VAE.pth", offload_device="cpu")
-    model_pool = pipe.download_and_load_models([t5_config, vae_config])
-    pipe.text_encoder = model_pool.fetch_model("wan_video_text_encoder")
-    pipe.vae = model_pool.fetch_model("wan_video_vae")
+    if precision == "bf16":
+        # ── BF16 path: RTX PRO 6000 96GB, GPU-resident, no offloading ──────────
+        print(f"[BF16 mode] Model dir: {bf16_dir}")
 
-    print(f"Loading high-noise DiT (FP8, gpu_resident={gpu_resident})...")
-    pipe.dit = load_wan_dit_fp8(
-        f"{WAN22_DIR}/high_noise_model_fp8", device=device, gpu_resident=gpu_resident
-    )
+        print("Loading T5 text encoder (BF16, GPU)...")
+        t5_config = ModelConfig(
+            path=f"{bf16_dir}/models_t5_umt5-xxl-enc-bf16.pth",
+            offload_device="cpu",   # offload after encoding to free VRAM between stages
+        )
+        vae_config = ModelConfig(
+            path=f"{bf16_dir}/Wan2.1_VAE.pth",
+            offload_device="cpu",
+        )
+        model_pool = pipe.download_and_load_models([t5_config, vae_config])
+        pipe.text_encoder = model_pool.fetch_model("wan_video_text_encoder")
+        pipe.vae = model_pool.fetch_model("wan_video_vae")
 
-    print(f"Loading low-noise DiT (FP8, gpu_resident={gpu_resident})...")
-    pipe.dit2 = load_wan_dit_fp8(
-        f"{WAN22_DIR}/low_noise_model_fp8", device=device, gpu_resident=gpu_resident
-    )
+        print("Loading high-noise DiT (BF16, GPU-resident)...")
+        pipe.dit = load_wan_dit_bf16(bf16_dir, "high", device=device)
 
-    print("Loading tokenizer...")
-    pipe.tokenizer = HuggingfaceTokenizer(
-        name=f"{WAN22_DIR}/google/umt5-xxl",
-        seq_len=512,
-        clean="whitespace",
-    )
+        print("Loading low-noise DiT (BF16, GPU-resident)...")
+        pipe.dit2 = load_wan_dit_bf16(bf16_dir, "low", device=device)
 
+        print("Loading tokenizer...")
+        pipe.tokenizer = HuggingfaceTokenizer(
+            name=f"{bf16_dir}/google/umt5-xxl",
+            seq_len=512,
+            clean="whitespace",
+        )
+
+    else:
+        # ── FP8 path: legacy 32GB path with custom block loader ──────────────
+        gpu_resident = os.environ.get("SVI_GPU_RESIDENT", "0") != "0"
+        print(f"[FP8 mode] Model dir: {WAN22_DIR}, gpu_resident={gpu_resident}")
+
+        print("Loading T5 text encoder and VAE (FP8, offloads to CPU)...")
+        t5_config = ModelConfig(path=f"{WAN22_DIR}/models_t5_umt5-xxl-enc-bf16.pth", offload_device="cpu")
+        vae_config = ModelConfig(path=f"{WAN22_DIR}/Wan2.1_VAE.pth", offload_device="cpu")
+        model_pool = pipe.download_and_load_models([t5_config, vae_config])
+        pipe.text_encoder = model_pool.fetch_model("wan_video_text_encoder")
+        pipe.vae = model_pool.fetch_model("wan_video_vae")
+
+        print(f"Loading high-noise DiT (FP8, gpu_resident={gpu_resident})...")
+        pipe.dit = load_wan_dit_fp8(
+            f"{WAN22_DIR}/high_noise_model_fp8", device=device, gpu_resident=gpu_resident
+        )
+
+        print(f"Loading low-noise DiT (FP8, gpu_resident={gpu_resident})...")
+        pipe.dit2 = load_wan_dit_fp8(
+            f"{WAN22_DIR}/low_noise_model_fp8", device=device, gpu_resident=gpu_resident
+        )
+
+        print("Loading tokenizer...")
+        pipe.tokenizer = HuggingfaceTokenizer(
+            name=f"{WAN22_DIR}/google/umt5-xxl",
+            seq_len=512,
+            clean="whitespace",
+        )
+
+    # ── Apply SVI LoRAs (same for both precision paths) ──────────────────────
     if os.path.exists(lora_path_high):
         print(f"Applying high-noise LoRA: {Path(lora_path_high).name}")
         pipe.load_lora(pipe.dit, lora_path_high, alpha=1)
@@ -493,7 +601,7 @@ def build_pipeline(lora_path_high: str, lora_path_low: str, device: str = "cuda"
         print(f"WARNING: Low-noise LoRA not found at {lora_path_low}, skipping")
 
     pipe.vram_management_enabled = pipe.check_vram_management_state()
-    print(f"Pipeline ready. VRAM management: {pipe.vram_management_enabled}")
+    print(f"Pipeline ready [{precision.upper()}]. VRAM management: {pipe.vram_management_enabled}")
     return pipe
 
 
@@ -593,12 +701,10 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
             num_inference_steps=steps,
             tiled=False,
             seed=seed_val,
-            # sigma_shift: read from config.
-            # S-08 I2V: 5.0 (official Wan2.2 I2V recommendation).
-            # S-09+ SVI continuation: 7.0 (SVI 2.0 Pro community recommendation).
-            # Using 5.0 for SVI continuation misaligns noise schedule against LoRA
-            # training distribution → systematically softer/hazier frames.
-            sigma_shift=float(config.get("sigma_shift", 5.0)),
+            # sigma_shift: SVIWrapper sends SVI_SIGMA_SHIFT_CONTINUATION=7.0 for S-09+.
+            # Default 7.0 is correct for SVI continuation; S-08 I2V (5.0) is routed
+            # via wan_wrapper.py, not this script.
+            sigma_shift=float(config.get("sigma_shift", 7.0)),
         )
         # num_motion_latent is an __init__ param of SviPipeline wrapper, NOT a __call__ param.
         # WanVideoSviPipeline.__call__ does not accept it — it was removed to fix TypeError.
@@ -882,6 +988,20 @@ def main() -> int:
         return 1
 
     config = json.loads(config_path.read_text(encoding="utf-8"))
+
+    # Propagate precision + BF16 dir from config into env so build_pipeline() picks them up.
+    # SVIWrapper writes "wan22_precision" and "wan22_bf16_dir" into the infer_config.
+    if "wan22_precision" in config:
+        os.environ.setdefault("WAN22_PRECISION", config["wan22_precision"])
+    if "wan22_bf16_dir" in config:
+        os.environ.setdefault("WAN22_BF16_DIR", config["wan22_bf16_dir"])
+
+    # Default to bf16 if not specified (RTX PRO 6000 path)
+    os.environ.setdefault("WAN22_PRECISION", "bf16")
+    os.environ.setdefault("WAN22_BF16_DIR", WAN22_BF16_DIR)
+
+    precision = os.environ["WAN22_PRECISION"]
+    print(f"Precision mode: {precision.upper()}")
 
     lora_path_high = config.get("lora_path_high", "")
     lora_path_low = config.get("lora_path_low", "")
