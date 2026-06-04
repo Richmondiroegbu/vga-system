@@ -42,6 +42,16 @@ print('diffsynth: OK')
 "
 
 echo ""
+echo "=== Writing BF16 + precision env vars to /workspace/.env_vga ==="
+cat >> /workspace/.env_vga << 'ENVEOF'
+
+# === RTX PRO 6000 BF16 upgrade (auto-appended by setup_pod.sh) ===
+SVI_GPU_RESIDENT=1
+WAN22_PRECISION=bf16
+WAN22_BF16_DIR=/workspace/models/wan22_bf16
+SVI_TEA_CACHE_THRESH=0.0
+ENVEOF
+
 echo "=== Setup complete — starting model downloads in background ==="
 nohup bash -c 'source /workspace/.env_vga && python3 /workspace/download_models.py \
     > /workspace/logs/download_models.log 2>&1' &

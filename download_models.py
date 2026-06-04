@@ -26,9 +26,12 @@ from huggingface_hub import snapshot_download, hf_hub_download
 # Groups run concurrently within each group; groups run sequentially between each other.
 # wan22 runs alone first (largest, 39 GB) to saturate bandwidth before splitting.
 DOWNLOAD_GROUPS = [
-    # Group 1: wan22 alone (39 GB — fills the pipe; runs first)
+    # Group 1: wan22 BF16 base model (~40 GB — fills the pipe; runs first)
+    # Upgraded from FP8 (nalexand/Wan2.2-I2V-A14B-FP8) to official BF16 base.
+    # RTX PRO 6000 96GB: both DiTs GPU-resident simultaneously, no offloading.
     [
-        ('wan22', 'snapshot', 'nalexand/Wan2.2-I2V-A14B-FP8', '/workspace/models/wan22', {}),
+        ('wan22_bf16', 'snapshot', 'Wan-AI/Wan2.2-I2V-A14B',
+         '/workspace/models/wan22_bf16', {}),
     ],
     # Group 2: small fast models in parallel
     [
@@ -51,7 +54,7 @@ DOWNLOAD_GROUPS = [
     ],
     # Group 3: medium models in parallel (4–8 GB each)
     [
-        ('qwen', 'snapshot', 'unsloth/Qwen2.5-14B-Instruct-unsloth-bnb-4bit',
+        ('qwen3', 'snapshot', 'Qwen/Qwen3-14B',
          '/workspace/models/qwen', {}),
         ('flux2', 'snapshot', 'black-forest-labs/FLUX.2-klein-4B',
          '/workspace/models/flux2', {}),
