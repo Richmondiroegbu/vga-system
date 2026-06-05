@@ -117,11 +117,9 @@ def download_one(entry):
         if typ == 'snapshot':
             repo_id, local_dir, kwargs = entry[2], entry[3], entry[4]
             os.makedirs(local_dir, exist_ok=True)
-            existing = [f for f in os.listdir(local_dir) if not f.startswith('.')]
-            if existing:
-                log.info('%s: already present (%d files) — skipping', name, len(existing))
-                return name, True
-            log.info('%s: starting  %s → %s', name, repo_id, local_dir)
+            # Always call snapshot_download — it skips already-complete files
+            # internally and resumes partial downloads. Never skip here.
+            log.info('%s: starting/resuming  %s → %s', name, repo_id, local_dir)
             snapshot_download(repo_id=repo_id, local_dir=local_dir, **kwargs)
         else:
             repo_id, filename, local_dir = entry[2]
