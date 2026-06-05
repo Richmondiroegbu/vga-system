@@ -277,7 +277,20 @@ def run_pipeline(job_id: str, request: dict) -> None:
         all_segments = [seg1_output["segment_1"]]
     logger.info(f"Generated {len(all_segments)} total segments")
 
-    if not wait_for_hrg("HRG-8", {"segments": len(all_segments)}, job_id):
+    # S-10: Continuity Validation
+    logger.info("S-10: Running continuity validation...")
+    update_job_status(job_id, "running", "S-10 ContinuityValidationAgent", 68.0)
+    from vga.agents.continuity_validation_agent import ContinuityValidationAgent
+    continuity_output, ctx = orchestrator.execute_stage(
+        ContinuityValidationAgent(),
+        {"video_segments": all_segments, "scene_id": ctx.scene_id,
+         "output_dir": str(output_dir)},
+        ctx
+    )
+    logger.info(f"Continuity validation complete — {len(all_segments)} segments validated")
+
+    if not wait_for_hrg("HRG-8", {"segments": len(all_segments),
+                                    "continuity_score": continuity_output.get("continuity_score", 0.0)}, job_id):
         return
 
     # ─── PHASE 4: Audio ───────────────────────────────────────────────────────
