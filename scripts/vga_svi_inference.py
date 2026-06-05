@@ -948,14 +948,34 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
         # assembly) are also normalized; their brightness is visible to the next
         # segment's conditioning extractor.
         if isinstance(video_frames, list):
-            n_anchor = len(overlap_frames_pil) if overlap_frames_pil is not None else 0
-            video_frames = enhance_frame_sequence_contrast(
-                video_frames,
-                n_anchor_frames=n_anchor,
-                target_mean=130.0,
-                unsharp_strength=0.5,
-                blend_ramp_frames=5,
-            )
+            precision = os.environ.get("WAN22_PRECISION", "bf16").lower()
+            if precision == "fp8":
+                # FP8 needs CLAHE + saturation + brightness fix for quantization artifacts.
+                n_anchor = len(overlap_frames_pil) if overlap_frames_pil is not None else 0
+                video_frames = enhance_frame_sequence_contrast(
+                    video_frames,
+                    n_anchor_frames=n_anchor,
+                    target_mean=130.0,
+                    unsharp_strength=0.5,
+                    blend_ramp_frames=5,
+                )
+            else:
+                # BF16 produces clean output — enhancement causes over-fried artifacts.
+                # Skip CLAHE, saturation boost, unsharp mask entirely.
+                # Only apply very gentle brightness anchoring (±5%) to prevent
+                # segment-to-segment drift without harming natural exposure.
+                import numpy as np
+                from PIL import Image as _PILImage
+                arrs = [np.array(f, dtype=np.float32) for f in video_frames]
+                seq_mean = float(np.mean([a.mean() for a in arrs]))
+                if seq_mean > 5.0:
+                    scale = float(np.clip(128.0 / seq_mean, 0.95, 1.05))
+                    if abs(scale - 1.0) > 0.01:
+                        video_frames = [
+                            _PILImage.fromarray(np.clip(a * scale, 0, 255).astype(np.uint8))
+                            for a in arrs
+                        ]
+                        print(f"  BF16 gentle anchor: mean={seq_mean:.1f} scale={scale:.3f}")
 
         from diffsynth.utils.data import save_video
         save_video(video_frames, str(output_path), fps=15, quality=5)
