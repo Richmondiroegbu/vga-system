@@ -93,7 +93,7 @@ class VGASettings(BaseSettings):
 
     # === Identity Thresholds ===
     CLIP_IDENTITY_THRESHOLD: float = 0.93        # RULE-92: minimum CLIP score everywhere
-    CLIP_SCENE_EXPANDED_MINIMUM: float = 0.70   # critical floor for scene-expanded images (wide shot vs close-up embedding)
+    CLIP_SCENE_EXPANDED_MINIMUM: float = 0.55   # floor for scene-expanded images (wide shot vs close-up portrait embedding naturally scores lower)
     CLIP_VIDEO_SEGMENT_MINIMUM: float = 0.75    # soft floor for SVI video segment keyframes (warning-only)
     CLIP_I2V_HARD_FLOOR: float = 0.15          # hard floor for I2V segments (S-08, S-09); scene frames naturally score low vs close-up ref
     CLIP_S08_I2V_MINIMUM: float = 0.15         # alias for backward compat

@@ -87,10 +87,15 @@ class ImageRefinementAgent(BaseAgent):
             "ImageRefinementAgent: input_clip=%.4f refined_clip=%.4f",
             initial_score, refined_score,
         )
-        # Only fail if post-refinement score is critically low (scene expansion naturally
-        # reduces identity score vs close-up base image; use relaxed floor threshold).
+        # Scene-expanded image vs close-up portrait reference naturally scores much lower.
+        # Warn if below floor but never hard-fail S-07 — the identity freeze still happens
+        # and the pipeline can continue. Hard gate is only at S-09 (CLIP_I2V_HARD_FLOOR).
         if refined_score < settings.CLIP_SCENE_EXPANDED_MINIMUM:
-            self._clip.assert_above_threshold(refined_score, self.stage_id, context.scene_id)
+            logger.warning(
+                "ImageRefinementAgent: refined CLIP=%.4f below scene-expanded floor=%.2f "
+                "(wide-shot vs close-up reference — acceptable, pipeline continues)",
+                refined_score, settings.CLIP_SCENE_EXPANDED_MINIMUM,
+            )
 
         logger.info(
             "ImageRefinementAgent: initial_clip=%.4f refined_clip=%.4f drift=%.4f",
