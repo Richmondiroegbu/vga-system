@@ -960,22 +960,47 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
                     blend_ramp_frames=5,
                 )
             else:
-                # BF16 produces clean output — enhancement causes over-fried artifacts.
-                # Skip CLAHE, saturation boost, unsharp mask entirely.
-                # Only apply very gentle brightness anchoring (±5%) to prevent
-                # segment-to-segment drift without harming natural exposure.
+                # BF16 produces clean output — NO CLAHE, NO saturation boost, NO unsharp.
+                # Only fix: anchor-brightness matching to prevent the inter-segment
+                # dimming / brightness step-change every 5 seconds.
+                #
+                # Anchor frames (0..n_anchor-1) are hard-replaced copies from the
+                # previous segment's tail. Their brightness defines the correct exposure
+                # for this segment. Generated frames (n_anchor..80) are scaled to match,
+                # then soft-ramped in over blend_ramp frames so there is no hard cliff.
                 import numpy as np
                 from PIL import Image as _PILImage
-                arrs = [np.array(f, dtype=np.float32) for f in video_frames]
-                seq_mean = float(np.mean([a.mean() for a in arrs]))
-                if seq_mean > 5.0:
-                    scale = float(np.clip(128.0 / seq_mean, 0.95, 1.05))
-                    if abs(scale - 1.0) > 0.01:
-                        video_frames = [
-                            _PILImage.fromarray(np.clip(a * scale, 0, 255).astype(np.uint8))
-                            for a in arrs
-                        ]
-                        print(f"  BF16 gentle anchor: mean={seq_mean:.1f} scale={scale:.3f}")
+                n_anchor = len(overlap_frames_pil) if overlap_frames_pil is not None else 0
+                if n_anchor > 0 and n_anchor < len(video_frames):
+                    # Measure anchor brightness (the correct target)
+                    anchor_arrs = [np.array(f, dtype=np.float32) for f in video_frames[:n_anchor]]
+                    anchor_mean = float(np.mean([a.mean() for a in anchor_arrs]))
+                    # Measure generated brightness
+                    gen_arrs = [np.array(f, dtype=np.float32) for f in video_frames[n_anchor:]]
+                    gen_mean = float(np.mean([a.mean() for a in gen_arrs]))
+                    if anchor_mean > 5.0 and gen_mean > 5.0:
+                        # Scale generated frames to match anchor brightness
+                        # Clamp to ±20% max adjustment so we never crush/blow highlights
+                        scale = float(np.clip(anchor_mean / gen_mean, 0.80, 1.20))
+                        if abs(scale - 1.0) > 0.01:
+                            blend_ramp = 8  # frames over which scale ramps from 1.0 → scale
+                            corrected = []
+                            for i, arr in enumerate(gen_arrs):
+                                if i < blend_ramp:
+                                    # Cosine ramp: 0 at frame 0, full at frame blend_ramp
+                                    alpha = 0.5 * (1.0 - np.cos(np.pi * i / blend_ramp))
+                                    s = 1.0 + alpha * (scale - 1.0)
+                                else:
+                                    s = scale
+                                corrected.append(
+                                    _PILImage.fromarray(np.clip(arr * s, 0, 255).astype(np.uint8))
+                                )
+                            video_frames = list(video_frames[:n_anchor]) + corrected
+                            print(
+                                f"  BF16 anchor-brightness: anchor_mean={anchor_mean:.1f} "
+                                f"gen_mean={gen_mean:.1f} scale={scale:.3f} ramp={blend_ramp}f"
+                            )
+                # Segment 1 (no anchors): no correction — trust the natural BF16 exposure
 
         from diffsynth.utils.data import save_video
         save_video(video_frames, str(output_path), fps=15, quality=5)
