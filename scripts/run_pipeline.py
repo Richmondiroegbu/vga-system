@@ -277,6 +277,12 @@ def run_pipeline(job_id: str, request: dict) -> None:
         all_segments = [seg1_output["segment_1"]]
     logger.info(f"Generated {len(all_segments)} total segments")
 
+    # Register S-09 completion in context so S-10 prerequisite check passes
+    ctx = ctx.with_stage_completed("S-09", {
+        "segments": len(all_segments),
+        "schema_version": "v6.0",
+    })
+
     # S-10: Continuity Validation
     logger.info("S-10: Running continuity validation...")
     update_job_status(job_id, "running", "S-10 ContinuityValidationAgent", 68.0)
