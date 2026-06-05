@@ -281,6 +281,38 @@ class ScriptSchema(BaseModel):
     total_duration_estimate_s: float = 60.0
     schema_version: str = "v6.0"
 
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_characters(cls, data: dict) -> dict:
+        """Qwen3 sometimes returns characters as plain strings instead of dicts.
+
+        e.g. ["Maya (protagonist)", "Community Members"] instead of
+             [{"name": "Maya", "role": "protagonist"}, ...]
+
+        Convert string entries to minimal CharacterDescription-compatible dicts
+        so validation succeeds. The pipeline can work with partial character data.
+        """
+        if not isinstance(data, dict):
+            return data
+        chars = data.get("characters", [])
+        if not isinstance(chars, list):
+            return data
+        coerced = []
+        for c in chars:
+            if isinstance(c, str):
+                # Parse "Name (role)" → {"name": "Name", "role": "role"}
+                name_part = c.split("(")[0].strip()
+                role_part = c[c.find("(")+1:c.find(")")] if "(" in c else ""
+                coerced.append({
+                    "name": name_part or c,
+                    "role": role_part or "supporting",
+                    "description": c,
+                })
+            else:
+                coerced.append(c)
+        data["characters"] = coerced
+        return data
+
     @model_validator(mode="after")
     def force_schema_version(self) -> "ScriptSchema":
         """Always use v6.0 regardless of what the LLM outputs."""

@@ -121,6 +121,10 @@ class ScriptAgent(BaseAgent):
             f"Theme: {theme}\n"
             f"Target duration: {duration_s} seconds\n"
             f"\n"
+            f"CRITICAL — characters field MUST be a list of objects, NOT strings.\n"
+            f'CORRECT:   "characters": [{{"name": "Maya", "role": "protagonist", "age_range": "late 20s", "appearance": "...", "emotional_arc": "...", "description": "..."}}]\n'
+            f'WRONG:     "characters": ["Maya (protagonist)"]\n'
+            f"\n"
             f"MANDATORY — ACTION DENSITY FOR MOTION EVALUATION:\n"
             f"Scene 1 must open with exactly 4 specific, coherent physical action beats\n"
             f"in the first 20 seconds. Fill opening_action_sequence with these 4 beats.\n"
