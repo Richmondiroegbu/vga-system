@@ -66,11 +66,12 @@ class VGASettings(BaseSettings):
     # === SVI Noise Schedule ===
     # sigma_shift controls the noise schedule distribution.
     # For base Wan2.2 I2V (S-08): 5.0 — official Wan2.2 recommendation for I2V.
-    # For SVI continuation (S-09+): 7.0 — SVI 2.0 Pro community recommendation.
-    # Using 5.0 (I2V value) for SVI continuation misaligns the schedule against the
-    # SVI LoRA's training distribution, producing systematically softer/hazier frames.
+    # For SVI continuation (S-09+): 5.0 — matches the official Wan2.2 I2V recommendation.
+    # 7.0 was previously set from unverified SVI forum speculation; it amplifies
+    # high-frequency noise and contributes to the "over fried" / overexposed look.
+    # 5.0 aligns the noise schedule with the SVI LoRA training distribution.
     SVI_SIGMA_SHIFT_I2V: float = 5.0           # S-08 base I2V generation
-    SVI_SIGMA_SHIFT_CONTINUATION: float = 7.0  # S-09+ SVI autoregressive continuation
+    SVI_SIGMA_SHIFT_CONTINUATION: float = 5.0  # S-09+ SVI autoregressive continuation
 
     # === SVI Persistent Server (speed optimisation) ===
     # SVIWrapper starts vga_svi_server.py as a background daemon on first segment
@@ -198,7 +199,10 @@ class VGASettings(BaseSettings):
     # === Z-Image-Turbo Settings ===
     ZIMAGE_DENOISE_MIN: float = 0.05
     ZIMAGE_DENOISE_MAX: float = 0.15
-    ZIMAGE_CFG: float = 5.0
+    # Z-Image-Turbo is a DISTILLED model — guidance is baked into training weights.
+    # Using CFG > 0 applies it twice → oversaturation on every image fed to WAN2.2.
+    # Correct value for ALL turbo/distilled img2img models is 0.0.
+    ZIMAGE_CFG: float = 0.0
 
     # === VRAM ===
     VRAM_ENFORCE_HARD_LIMIT: bool = True

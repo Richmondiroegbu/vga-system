@@ -143,9 +143,8 @@ class SVIWrapper:
             # 0.75 (original) caused too much face warping at high cfg.
             # Overridden to 0.90 (hard_cut) or 0.80 (blend) for transition segments.
             "denoising_strength": 0.72,
-            # sigma_shift=7.0 for SVI continuation (S-09+): SVI 2.0 Pro community recommendation.
-            # sigma_shift=5.0 (Wan2.2 I2V default) misaligns the noise schedule against the
-            # SVI LoRA training distribution → systematically softer/hazier output frames.
+            # sigma_shift=5.0 for SVI continuation (S-09+): matches Wan2.2 I2V official spec.
+            # 7.0 was forum speculation that amplified high-frequency noise → overexposure.
             "sigma_shift": settings.SVI_SIGMA_SHIFT_CONTINUATION,
             # -1 = random seed per segment; fixed seed causes identical outputs across segments.
             "seed": -1,

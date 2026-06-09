@@ -701,10 +701,10 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
             num_inference_steps=steps,
             tiled=False,
             seed=seed_val,
-            # sigma_shift: SVIWrapper sends SVI_SIGMA_SHIFT_CONTINUATION=7.0 for S-09+.
-            # Default 7.0 is correct for SVI continuation; S-08 I2V (5.0) is routed
-            # via wan_wrapper.py, not this script.
-            sigma_shift=float(config.get("sigma_shift", 7.0)),
+            # sigma_shift: SVIWrapper sends SVI_SIGMA_SHIFT_CONTINUATION (now 5.0) for S-09+.
+            # 7.0 was forum speculation; 5.0 matches the Wan2.2 I2V official recommendation
+            # and avoids amplifying high-frequency artifacts that cause overexposure.
+            sigma_shift=float(config.get("sigma_shift", 5.0)),
         )
         # num_motion_latent is an __init__ param of SviPipeline wrapper, NOT a __call__ param.
         # WanVideoSviPipeline.__call__ does not accept it — it was removed to fix TypeError.
