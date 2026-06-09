@@ -1,34 +1,46 @@
 #!/usr/bin/env python3
 """
-test_image_video.py — Direct image + video quality test. No pipeline stages.
+test_image_video.py — Direct pipeline stage test: S-05 → S-07 → S-08 → S-09
 
-Skips ALL VGA pipeline orchestration (no Qwen, no HRG, no agents, no context).
-Goes directly: FLUX → Z-Image → WAN2.2 (SVI).
+Mirrors exactly the image-to-video spine of the full pipeline with NO orchestration
+(no ImmutableContext, no HRG, no agents, no Qwen). Goes directly to model inference.
 
-This is specifically for diagnosing the "over fried" (overexposed/oversaturated)
-output issue after the two confirmed fixes:
-  1. Z-Image guidance_scale: 5.0 → 0.0  (distilled model, CFG must be 0)
-  2. sigma_shift: 7.0 → 5.0             (SVI Python API default, 7.0 had no source)
+Stage mapping:
+  S-05  BaseImageAgent      → FLUX.2-klein-4B        → character base image
+  S-07  ImageRefinementAgent → Z-Image-Turbo          → refined character image
+  S-08  VideoSegmentGenerator → WAN2.2 I2V (SVI)     → segment 001 (first, from image)
+  S-09  TemporalEngine/SVI   → SVI continuation loop → segments 002, 003, ... (from video)
+
+Confirmed fixes applied in this script:
+  • Z-Image guidance_scale: 5.0 → 0.0  (official model card, distilled model)
+  • sigma_shift: 7.0 → 5.0             (SVI Python API default, 7.0 had no source)
 
 Usage:
-    # Full test: images + video
+    # Images only (examine S-05 + S-07 output first — cheapest test)
+    python3 scripts/test_image_video.py --image-only
+
+    # S-05 → S-07 → S-08 only (first video segment from image)
+    python3 scripts/test_image_video.py --precision bf16 --segments 0
+
+    # Full test: S-05 → S-07 → S-08 → S-09 x1 continuation segment
     python3 scripts/test_image_video.py --precision bf16
 
-    # Images only (skip WAN2.2 — useful to isolate FLUX/Z-Image first)
-    python3 scripts/test_image_video.py --precision bf16 --image-only
+    # Full test with 2 continuation segments (S-09 x2)
+    python3 scripts/test_image_video.py --precision bf16 --segments 2
 
-    # RTX 5090 32GB
+    # RTX 5090 (32GB) — use fp8 precision
     python3 scripts/test_image_video.py --precision fp8
 
-    # Custom options
-    python3 scripts/test_image_video.py --precision bf16 --steps 20 --cfg 7.0 \\
-        --prompt "cinematic portrait of a resilient young woman, warm light"
+Outputs saved to /workspace/output/test/<RUN_ID>/:
+    S05_base_image.png          — S-05: raw FLUX.2-klein-4B output
+    S07_refined_image.png       — S-07: Z-Image-Turbo refined (guidance=0.0 FIXED)
+    S08_segment_001.mp4         — S-08: WAN2.2 I2V first segment (from image)
+    S09_segment_002.mp4         — S-09: SVI continuation segment 2
+    S09_segment_003.mp4         — S-09: SVI continuation segment 3 (if --segments 2)
+    test_report.txt             — brightness/saturation stats + parameters used
 
-Outputs saved to /workspace/output/test/:
-    01_flux.png             — raw FLUX output
-    02_zimage_refined.png   — Z-Image refined (guidance=0.0, strength=0.05)
-    03_segment.mp4          — WAN2.2 video from the refined image
-    test_report.txt         — brightness/saturation stats + parameters used
+Then download to local machine:
+    python3 scripts/download_test_outputs.py
 """
 from __future__ import annotations
 
@@ -40,7 +52,16 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
+
+# ── RUN ID ─────────────────────────────────────────────────────────────────────
+# Each test run gets a unique subdirectory so multiple runs don't overwrite each other.
+RUN_ID = time.strftime("%Y%m%d_%H%M%S")
+
+OUT_DIR = Path(f"/workspace/output/test/{RUN_ID}")
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+Path("/workspace/logs").mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,31 +69,26 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("/workspace/logs/test_image_video.log", mode="a"),
+        logging.FileHandler(f"/workspace/logs/test_image_video_{RUN_ID}.log", mode="w"),
     ],
 )
 log = logging.getLogger("test_image_video")
 
-OUT_DIR = Path("/workspace/output/test")
-OUT_DIR.mkdir(parents=True, exist_ok=True)
-Path("/workspace/logs").mkdir(parents=True, exist_ok=True)
-
-# ── Model paths ───────────────────────────────────────────────────────────────
-FLUX_PATH         = "/workspace/models/flux2"
-ZIMAGE_PATH       = "/workspace/models/zimage"
-WAN22_BF16_PATH   = "/workspace/models/wan22_bf16"
-WAN22_FP8_PATH    = "/workspace/models/wan22"
-CONSISTENCY_LORA  = "/workspace/loras/consistency/f2k_4B_consist_20260314.safetensors"
-SVI_HIGH_LORA     = "/workspace/loras/svi/SVI_Wan2.2-I2V-A14B_high_noise_lora_v2.0_pro.safetensors"
-SVI_LOW_LORA      = "/workspace/loras/svi/SVI_Wan2.2-I2V-A14B_low_noise_lora_v2.0_pro.safetensors"
-SVI_INFERENCE     = "/workspace/scripts/vga_svi_inference.py"
-SVI_PYTHON        = "/opt/conda/envs/svi_wan22/bin/python3"
+# ── Model paths ────────────────────────────────────────────────────────────────
+FLUX_PATH        = "/workspace/models/flux2"
+ZIMAGE_PATH      = "/workspace/models/zimage"
+WAN22_BF16_PATH  = "/workspace/models/wan22_bf16"
+WAN22_FP8_PATH   = "/workspace/models/wan22"
+SVI_HIGH_LORA    = "/workspace/loras/svi/SVI_Wan2.2-I2V-A14B_high_noise_lora_v2.0_pro.safetensors"
+SVI_LOW_LORA     = "/workspace/loras/svi/SVI_Wan2.2-I2V-A14B_low_noise_lora_v2.0_pro.safetensors"
+SVI_INFERENCE    = "/workspace/scripts/vga_svi_inference.py"
+SVI_PYTHON       = "/opt/conda/envs/svi_wan22/bin/python3"
 
 
-# ── Stats helper ─────────────────────────────────────────────────────────────
+# ── Stats helpers ──────────────────────────────────────────────────────────────
 
 def image_stats(img) -> dict:
-    """Return mean brightness and mean HSV saturation for a PIL image."""
+    """Mean brightness and HSV saturation for a PIL image."""
     import numpy as np
     import cv2
     arr = np.array(img.convert("RGB"))
@@ -86,24 +102,19 @@ def image_stats(img) -> dict:
     }
 
 
-def _exposure_label(brightness: float, saturation: float) -> str:
-    if brightness > 180:
-        return "OVEREXPOSED"
-    if brightness > 155:
-        return "BRIGHT (borderline)"
-    if brightness < 60:
-        return "UNDEREXPOSED"
-    if saturation > 140:
-        return "OVERSATURATED"
-    if saturation > 120:
-        return "SATURATED (borderline)"
+def _exposure_label(b: float, s: float) -> str:
+    if b > 180:   return "OVEREXPOSED"
+    if b > 155:   return "BRIGHT (borderline)"
+    if b < 60:    return "UNDEREXPOSED"
+    if s > 140:   return "OVERSATURATED"
+    if s > 120:   return "SATURATED (borderline)"
     return "OK"
 
 
-# ── Pre-flight checks ─────────────────────────────────────────────────────────
+# ── Pre-flight ─────────────────────────────────────────────────────────────────
 
-def preflight(precision: str, image_only: bool, svi_python: str) -> None:
-    """Verify required models exist before starting. Fail fast with clear messages."""
+def preflight(precision: str, image_only: bool, segments: int, svi_python: str) -> None:
+    """Verify all required models/scripts exist. Fail fast with clear messages."""
     errors = []
 
     if not Path(FLUX_PATH).exists():
@@ -123,33 +134,32 @@ def preflight(precision: str, image_only: bool, svi_python: str) -> None:
             errors.append(f"SVI inference script missing: {SVI_INFERENCE}")
         if not Path(svi_python).exists():
             errors.append(
-                f"SVI Python not found: {svi_python}\n"
-                f"  Run bootstrap first or pass --svi-python /path/to/python"
+                f"SVI Python missing: {svi_python}\n"
+                "  Run: python3 scripts/test_minimal_bootstrap.py first"
             )
 
     if errors:
-        log.error("Pre-flight FAILED — missing required files:")
+        log.error("Pre-flight FAILED:")
         for e in errors:
             log.error("  ✗ %s", e)
-        log.error("\nRun first: python3 scripts/test_minimal_bootstrap.py --precision %s", precision)
         sys.exit(1)
 
-    log.info("Pre-flight OK — all required models found.")
+    log.info("Pre-flight OK — all models found.")
 
 
-# ── Step 1: FLUX image generation ────────────────────────────────────────────
+# ── S-05: FLUX base image ──────────────────────────────────────────────────────
 
-def run_flux(prompt: str, seed: int = 42) -> "PIL.Image.Image":
-    """Generate a base image with FLUX.2-klein-4B.
+def run_s05_flux(prompt: str, seed: int) -> tuple:
+    """S-05 equivalent: BaseImageAgent → FLUX.2-klein-4B → base character image.
 
-    Settings used (verified correct for distilled FLUX):
-      guidance_scale = 1.0   (BFL spec for distilled model)
+    Params (BFL spec for distilled model):
+      guidance_scale = 1.0
       num_inference_steps = 4
     """
     import torch
     from diffusers import DiffusionPipeline
 
-    log.info("--- Step 1: FLUX image generation ---")
+    log.info("━━━ S-05: FLUX base image generation ━━━")
     log.info("  model: %s", FLUX_PATH)
     log.info("  guidance_scale=1.0  steps=4  seed=%d", seed)
 
@@ -166,39 +176,36 @@ def run_flux(prompt: str, seed: int = 42) -> "PIL.Image.Image":
     elapsed = time.time() - t0
 
     img = result.images[0]
-    out_path = OUT_DIR / "01_flux.png"
+    out_path = OUT_DIR / "S05_base_image.png"
     img.save(str(out_path))
     stats = image_stats(img)
 
-    log.info("  ✓ FLUX done in %.1fs  →  %s", elapsed, out_path.name)
-    log.info("  Stats: brightness=%.1f  saturation=%.1f  [%s]",
+    log.info("  ✓ S-05 done in %.1fs → %s", elapsed, out_path.name)
+    log.info("  brightness=%.1f  saturation=%.1f  [%s]",
              stats["brightness"], stats["saturation"], stats["status"])
 
-    # Free VRAM before loading Z-Image
     del pipe, result
-    import gc; gc.collect()
-    if hasattr(torch.cuda, "empty_cache"):
-        torch.cuda.empty_cache()
-
+    _free_vram(torch)
     return img, stats
 
 
-# ── Step 2: Z-Image-Turbo refinement ─────────────────────────────────────────
+# ── S-07: Z-Image refinement ───────────────────────────────────────────────────
 
-def run_zimage(image, prompt: str, seed: int = 42) -> "PIL.Image.Image":
-    """Refine the FLUX image with Z-Image-Turbo.
+def run_s07_zimage(image, prompt: str, seed: int) -> tuple:
+    """S-07 equivalent: ImageRefinementAgent → Z-Image-Turbo → refined character image.
 
-    Settings used (confirmed fix — guidance_scale must be 0.0 for distilled model):
-      guidance_scale = 0.0   (official model card: "Guidance should be 0 for Turbo")
-      strength = 0.05        (very light denoising — sharpens without changing content)
+    Params (FIXED — confirmed by official Z-Image-Turbo model card):
+      guidance_scale = 0.0   (DISTILLED model — guidance is baked into weights.
+                               Using CFG > 0 applies it twice → oversaturation.)
+      strength = 0.05        (light refinement — sharpens without changing content)
       num_inference_steps = 4
     """
     import torch
     from diffusers import AutoPipelineForImage2Image
 
-    log.info("--- Step 2: Z-Image-Turbo refinement ---")
+    log.info("━━━ S-07: Z-Image-Turbo refinement ━━━")
     log.info("  model: %s", ZIMAGE_PATH)
-    log.info("  guidance_scale=0.0  strength=0.05  steps=4  seed=%d  [FIXED]", seed)
+    log.info("  guidance_scale=0.0 [FIXED from 5.0]  strength=0.05  steps=4  seed=%d", seed)
 
     pipe = AutoPipelineForImage2Image.from_pretrained(ZIMAGE_PATH, torch_dtype=torch.bfloat16)
     pipe.enable_model_cpu_offload()
@@ -215,58 +222,56 @@ def run_zimage(image, prompt: str, seed: int = 42) -> "PIL.Image.Image":
     elapsed = time.time() - t0
 
     refined = result.images[0]
-    out_path = OUT_DIR / "02_zimage_refined.png"
+    out_path = OUT_DIR / "S07_refined_image.png"
     refined.save(str(out_path))
     stats = image_stats(refined)
 
-    log.info("  ✓ Z-Image done in %.1fs  →  %s", elapsed, out_path.name)
-    log.info("  Stats: brightness=%.1f  saturation=%.1f  [%s]",
+    log.info("  ✓ S-07 done in %.1fs → %s", elapsed, out_path.name)
+    log.info("  brightness=%.1f  saturation=%.1f  [%s]",
              stats["brightness"], stats["saturation"], stats["status"])
 
     del pipe, result
-    import gc; gc.collect()
-    if hasattr(torch.cuda, "empty_cache"):
-        torch.cuda.empty_cache()
-
+    _free_vram(torch)
     return refined, stats
 
 
-# ── Step 3: WAN2.2 video generation ──────────────────────────────────────────
+# ── S-08: WAN2.2 first segment (I2V from image) ───────────────────────────────
 
-def run_wan22(
-    image_path: str,
+def run_s08_wan22(
+    refined_image_path: str,
     prompt: str,
     precision: str,
     steps: int,
     cfg: float,
     svi_python: str,
-    seed: int = -1,
+    seed: int,
 ) -> str | None:
-    """Generate a video segment from the refined image using WAN2.2/SVI.
+    """S-08 equivalent: VideoSegmentGenerator → WAN2.2 I2V → segment 001.
 
-    Calls vga_svi_inference.py in the svi_wan22 env via subprocess.
-    This is exactly how the real pipeline runs it.
+    S-08 mode: init_image_path provided, no prev_segment_path.
+    vga_svi_inference.py uses denoising_strength=1.0 for this mode (full I2V).
 
-    Settings used:
-      sigma_shift = 5.0      (FIXED — SVI Python API default; 7.0 had no source)
-      denoising_strength = 1.0  (S-08 I2V bootstrap mode — full generation from image)
-      cfg_scale = 7.0 (default, overridable with --cfg)
+    Params:
+      sigma_shift = 5.0   (FIXED from 7.0 — SVI Python API default)
+      denoising_strength = 1.0  (full generation from still image)
     """
-    log.info("--- Step 3: WAN2.2 video generation ---")
-
+    log.info("━━━ S-08: WAN2.2 I2V first segment ━━━")
     wan_path = WAN22_BF16_PATH if precision == "bf16" else WAN22_FP8_PATH
     log.info("  precision=%s  model=%s", precision.upper(), wan_path)
-    log.info("  cfg=%.1f  steps=%d  sigma_shift=5.0  [FIXED]", cfg, steps)
+    log.info("  cfg=%.1f  steps=%d  sigma_shift=5.0 [FIXED]  denoising_strength=1.0", cfg, steps)
+    log.info("  input: %s", Path(refined_image_path).name)
 
-    output_path = str(OUT_DIR / "03_segment.mp4")
+    output_path = str(OUT_DIR / "S08_segment_001.mp4")
 
-    infer_config = {
-        "init_image_path": image_path,
+    config = {
+        # S-08 mode: init_image_path set, no prev_segment_path
+        "init_image_path": refined_image_path,
+        "ref_image_path": refined_image_path,   # identity anchor
         "prompt": prompt,
         "cfg": cfg,
         "steps": steps,
         "lora_path_high": SVI_HIGH_LORA,
-        "lora_path_low":  SVI_LOW_LORA,
+        "lora_path_low": SVI_LOW_LORA,
         "lora_schedule": {
             "high_noise_weight": 0.6,
             "mid_noise_weight":  0.5,
@@ -275,24 +280,90 @@ def run_wan22(
         "camera_motion": "static camera",
         "motion_vector": "natural gentle movement",
         "output_path": output_path,
-        "sigma_shift": 5.0,           # FIXED from 7.0 — SVI Python API default
-        "denoising_strength": 0.72,   # used in S-09 bootstrap continuation
+        "sigma_shift": 5.0,         # FIXED from 7.0
         "num_overlap_frames": 5,
         "seed": seed,
         "wan22_precision": precision,
         "wan22_bf16_dir": WAN22_BF16_PATH,
-        "ref_image_path": image_path,  # anchor = input image (keeps identity stable)
     }
 
-    # Write config to temp file
+    return _run_svi_inference(config, svi_python, precision, "S-08", output_path)
+
+
+# ── S-09: SVI continuation segments ───────────────────────────────────────────
+
+def run_s09_svi(
+    prev_segment_path: str,
+    refined_image_path: str,
+    segment_num: int,
+    prompt: str,
+    precision: str,
+    steps: int,
+    cfg: float,
+    svi_python: str,
+    seed: int,
+) -> str | None:
+    """S-09 equivalent: TemporalEngine → SVI continuation → segment N.
+
+    S-09 mode: prev_segment_path + ref_image_path (36-channel input to DiT):
+      - last 5 frames of prev_segment → input_video → 16ch video latents
+      - last frame of prev_segment    → input_image → 20ch (4 mask + 16 VAE)
+      Total: 36ch ✓
+
+    Params:
+      denoising_strength = 0.72  (balanced continuation, tighter than 0.75)
+      sigma_shift = 5.0          (FIXED from 7.0)
+      num_overlap_frames = 5     (TEMPORAL_BUFFER_SIZE — pipeline constant)
+    """
+    log.info("━━━ S-09: SVI continuation segment %03d ━━━", segment_num)
+    log.info("  prev_segment: %s", Path(prev_segment_path).name)
+    log.info("  cfg=%.1f  steps=%d  sigma_shift=5.0 [FIXED]  denoising_strength=0.72", cfg, steps)
+
+    output_path = str(OUT_DIR / f"S09_segment_{segment_num:03d}.mp4")
+
+    config = {
+        # S-09 mode: prev_segment_path set (both input_video AND input_image extracted from it)
+        "prev_segment_path": prev_segment_path,
+        "ref_image_path": refined_image_path,   # original S-07 anchor — prevents identity drift
+        "prompt": prompt,
+        "cfg": cfg,
+        "steps": steps,
+        "lora_path_high": SVI_HIGH_LORA,
+        "lora_path_low": SVI_LOW_LORA,
+        "lora_schedule": {
+            "high_noise_weight": 0.6,
+            "mid_noise_weight":  0.5,
+            "low_noise_weight":  0.4,
+        },
+        "camera_motion": "static camera",
+        "motion_vector": "natural gentle movement",
+        "output_path": output_path,
+        "sigma_shift": 5.0,           # FIXED from 7.0
+        "denoising_strength": 0.72,   # S-09 continuation mode
+        "num_overlap_frames": 5,      # TEMPORAL_BUFFER_SIZE
+        "seed": -1,                   # random per segment (fixed seed → identical segments)
+        "wan22_precision": precision,
+        "wan22_bf16_dir": WAN22_BF16_PATH,
+    }
+
+    return _run_svi_inference(config, svi_python, precision, f"S-09 seg{segment_num:03d}", output_path)
+
+
+# ── SVI subprocess runner ─────────────────────────────────────────────────────
+
+def _run_svi_inference(
+    config: dict,
+    svi_python: str,
+    precision: str,
+    label: str,
+    output_path: str,
+) -> str | None:
+    """Write config to temp file, call vga_svi_inference.py via subprocess."""
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".json", delete=False, encoding="utf-8"
     ) as f:
-        json.dump(infer_config, f, indent=2)
+        json.dump(config, f, indent=2)
         config_path = f.name
-
-    log.info("  Config: %s", config_path)
-    log.info("  Running SVI inference (this takes several minutes) ...")
 
     env = os.environ.copy()
     env["WAN22_PRECISION"] = precision
@@ -300,15 +371,16 @@ def run_wan22(
     env["SVI_GPU_RESIDENT"] = "1"
     env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
+    log.info("  Running SVI inference (takes several minutes) ...")
     t0 = time.time()
     try:
-        result = subprocess.run(
+        proc = subprocess.run(
             [svi_python, SVI_INFERENCE, "--config", config_path],
             env=env,
             timeout=1800,
         )
     except subprocess.TimeoutExpired:
-        log.error("  WAN2.2 timed out after 30 minutes")
+        log.error("  %s timed out after 30 minutes", label)
         return None
     finally:
         try:
@@ -318,106 +390,150 @@ def run_wan22(
 
     elapsed = time.time() - t0
 
-    if result.returncode != 0:
-        log.error("  WAN2.2 inference FAILED (returncode=%d)", result.returncode)
+    if proc.returncode != 0:
+        log.error("  %s FAILED (returncode=%d)", label, proc.returncode)
         return None
 
     if not Path(output_path).exists():
-        log.error("  Output file not written: %s", output_path)
+        log.error("  %s: output not written: %s", label, output_path)
         return None
 
     size_mb = Path(output_path).stat().st_size / 1e6
-    log.info("  ✓ WAN2.2 done in %.1fs  →  %s (%.1f MB)", elapsed, output_path, size_mb)
+    log.info("  ✓ %s done in %.1fs → %s (%.1f MB)", label, elapsed,
+             Path(output_path).name, size_mb)
     return output_path
 
 
-# ── Report ────────────────────────────────────────────────────────────────────
+def _free_vram(torch) -> None:
+    import gc
+    gc.collect()
+    if hasattr(torch.cuda, "empty_cache"):
+        torch.cuda.empty_cache()
+
+
+# ── Report ─────────────────────────────────────────────────────────────────────
 
 def write_report(
     args: argparse.Namespace,
     prompt: str,
-    flux_stats: dict,
-    zimage_stats: dict,
-    video_path: str | None,
+    s05_stats: dict,
+    s07_stats: dict,
+    segments: list[str | None],
 ) -> None:
     lines = [
-        "VGA Image/Video Quality Test Report",
+        "VGA Pipeline Stage Test Report",
         "=" * 60,
-        f"Date:        {time.strftime('%Y-%m-%d %H:%M:%S')}",
-        f"Precision:   {args.precision.upper()}",
-        f"Steps:       {args.steps}",
-        f"CFG:         {args.cfg}",
-        f"Prompt:      {prompt}",
-        f"Seed:        {args.seed}",
+        f"Run ID:       {RUN_ID}",
+        f"Date:         {time.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"Precision:    {args.precision.upper()}",
+        f"Steps:        {args.steps}",
+        f"CFG:          {args.cfg}",
+        f"Seed:         {args.seed}",
+        f"Prompt:       {prompt}",
         "",
         "APPLIED FIXES (verified against primary sources):",
-        "  Z-Image guidance_scale: 5.0 → 0.0  (official model card requirement)",
-        "  sigma_shift: 7.0 → 5.0  (SVI Python API default; 7.0 had no source)",
+        "  [S-07] Z-Image guidance_scale: 5.0 → 0.0",
+        "         Source: official Tongyi-MAI/Z-Image-Turbo model card",
+        "         Reason: distilled model — CFG > 0 applies guidance twice → oversaturation",
+        "  [S-08/S-09] sigma_shift: 7.0 → 5.0",
+        "         Source: SVI Python API default (vita-epfl/Stable-Video-Infinity)",
+        "         Reason: 7.0 was unverified forum speculation",
         "",
-        "IMAGE STATS",
-        "-" * 40,
-        f"  01_flux.png      brightness={flux_stats['brightness']:.1f}  "
-        f"saturation={flux_stats['saturation']:.1f}  [{flux_stats['status']}]",
-        f"  02_zimage.png    brightness={zimage_stats['brightness']:.1f}  "
-        f"saturation={zimage_stats['saturation']:.1f}  [{zimage_stats['status']}]",
+        "STAGE IMAGE STATS",
+        "-" * 60,
+        f"  {'Stage':<8}  {'File':<30}  {'Brightness':>10}  {'Saturation':>10}  {'Status'}",
+        f"  {'-'*8}  {'-'*30}  {'-'*10}  {'-'*10}  {'-'*20}",
+        f"  {'S-05':<8}  {'S05_base_image.png':<30}  "
+        f"{s05_stats['brightness']:>10.1f}  {s05_stats['saturation']:>10.1f}  {s05_stats['status']}",
+        f"  {'S-07':<8}  {'S07_refined_image.png':<30}  "
+        f"{s07_stats['brightness']:>10.1f}  {s07_stats['saturation']:>10.1f}  {s07_stats['status']}",
         "",
-        "REFERENCE (healthy range):",
-        "  Brightness : 90–150  (>160 = overexposed,  <70 = underexposed)",
-        "  Saturation : 60–110  (>130 = oversaturated / 'over fried')",
+        "REFERENCE RANGES (healthy output):",
+        "  Brightness: 90–150  (>160 = overexposed,  <70 = underexposed)",
+        "  Saturation: 60–110  (>130 = oversaturated / 'over fried')",
         "",
-        "VIDEO OUTPUT",
-        "-" * 40,
-        f"  {'03_segment.mp4  →  ' + str(video_path) if video_path else 'SKIPPED (--image-only) or FAILED'}",
+        "VIDEO SEGMENTS",
+        "-" * 60,
+    ]
+
+    seg_labels = ["S-08 (first segment, I2V from image)"] + \
+                 [f"S-09 continuation (segment {i+2})" for i in range(len(segments) - 1)]
+    seg_files  = ["S08_segment_001.mp4"] + \
+                 [f"S09_segment_{i+2:03d}.mp4" for i in range(len(segments) - 1)]
+
+    for label, fname, path in zip(seg_labels, seg_files, segments):
+        if path and Path(path).exists():
+            mb = Path(path).stat().st_size / 1e6
+            lines.append(f"  ✓ {label:<45}  {fname}  ({mb:.1f} MB)")
+        else:
+            lines.append(f"  ✗ {label:<45}  FAILED or SKIPPED")
+
+    lines += [
         "",
         "HOW TO INTERPRET",
-        "-" * 40,
-        "  If FLUX stats are OK but Z-Image is worse → fixed CFG did not fully resolve it.",
-        "  If both images are OK but video is over-fried → WAN2.2 is the source.",
-        "  If video is OK → fixes resolved the problem, test with full pipeline next.",
+        "-" * 60,
+        "  S-05 bright/saturated → FLUX is the source (unlikely, BFL spec is correct)",
+        "  S-05 OK, S-07 worse   → Z-Image CFG fix did not fully resolve it",
+        "  S-05 + S-07 OK, video over-fried → WAN2.2/SVI is the source",
+        "  All OK                → fixes resolved the problem; test with full pipeline",
         "",
-        "NEXT STEP IF VIDEO IS STILL OVER-FRIED",
-        "-" * 40,
-        "  Test hypothesis: remove 'vivid colors, high contrast, sharp detail'",
-        "  from the positive prompt in scripts/vga_svi_inference.py line ~676.",
-        "  (unverified — no primary source confirms these terms cause overexposure",
-        "   specifically in Wan2.2, but worth testing if sigma_shift fix alone didn't help)",
+        "IF VIDEO IS STILL OVER-FRIED:",
+        "  Unverified hypothesis: 'vivid colors, high contrast, sharp detail' in the",
+        "  positive prompt (vga_svi_inference.py ~line 676) may amplify saturation.",
+        "  Test by removing those terms and comparing outputs.",
+        "",
+        f"Output directory: /workspace/output/test/{RUN_ID}/",
+        "Download to local: python3 scripts/download_test_outputs.py",
     ]
+
     report_path = OUT_DIR / "test_report.txt"
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    log.info("Report written → %s", report_path)
     print("\n" + "\n".join(lines))
+    log.info("Report → %s", report_path)
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ── Main ───────────────────────────────────────────────────────────────────────
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="VGA direct image+video quality test")
+    parser = argparse.ArgumentParser(
+        description="VGA pipeline stage test: S-05 → S-07 → S-08 → S-09",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument(
         "--precision", choices=["bf16", "fp8"], default="bf16",
-        help="bf16 = 48GB+ GPU (A6000).  fp8 = 32GB GPU (RTX 5090).",
+        help="bf16 = 48GB+ GPU (A6000).  fp8 = 32GB GPU (RTX 5090). Default: bf16",
     )
     parser.add_argument(
         "--image-only", action="store_true",
-        help="Stop after Z-Image refinement — skip WAN2.2 video generation.",
+        help="Run only S-05 and S-07 (FLUX + Z-Image). Skip all video generation.",
+    )
+    parser.add_argument(
+        "--segments", type=int, default=1,
+        help=(
+            "Number of S-09 SVI continuation segments to generate AFTER the S-08 "
+            "first segment. 0 = S-08 only. 1 = S-08 + 1 continuation (default). "
+            "2 = S-08 + 2 continuations. Each segment takes ~5-15 min."
+        ),
     )
     parser.add_argument(
         "--steps", type=int, default=20,
-        help="WAN2.2 inference steps. 20=fast test, 30=standard quality. Default: 20",
+        help="Inference steps per segment. 20=fast test, 30=standard quality. Default: 20",
     )
     parser.add_argument(
         "--cfg", type=float, default=7.0,
         help="WAN2.2 CFG scale. Default: 7.0",
     )
     parser.add_argument(
-        "--prompt", default=(
+        "--prompt",
+        default=(
             "cinematic portrait of a determined young man, resilient expression, "
             "warm natural window light, medium shot, photorealistic"
         ),
-        help="Text prompt for FLUX image generation.",
+        help="Text prompt used for all stages.",
     )
     parser.add_argument(
         "--seed", type=int, default=42,
-        help="Random seed for reproducibility. Default: 42",
+        help="Random seed for S-05 and S-07 (reproducibility). Default: 42",
     )
     parser.add_argument(
         "--svi-python", default=SVI_PYTHON,
@@ -426,29 +542,35 @@ def main() -> int:
     args = parser.parse_args()
 
     log.info("=" * 60)
-    log.info("VGA Direct Image+Video Test")
-    log.info("  precision=%s  steps=%d  cfg=%.1f  image-only=%s",
-             args.precision, args.steps, args.cfg, args.image_only)
-    log.info("  output: %s", OUT_DIR)
+    log.info("VGA Pipeline Stage Test  [Run ID: %s]", RUN_ID)
+    log.info("  Stages:    S-05 → S-07%s",
+             "" if args.image_only else f" → S-08 → S-09 x{args.segments}")
+    log.info("  Precision: %s  Steps: %d  CFG: %.1f",
+             args.precision.upper(), args.steps, args.cfg)
+    log.info("  Output:    %s", OUT_DIR)
     log.info("=" * 60)
 
-    # Pre-flight checks
-    preflight(args.precision, args.image_only, args.svi_python)
+    preflight(args.precision, args.image_only, args.segments, args.svi_python)
 
     refine_prompt = args.prompt + ", photorealistic, high detail, cinematic"
 
-    # Step 1: FLUX
-    flux_img, flux_stats = run_flux(args.prompt, seed=args.seed)
+    # ── S-05: FLUX ──────────────────────────────────────────────────────────────
+    base_img, s05_stats = run_s05_flux(args.prompt, seed=args.seed)
 
-    # Step 2: Z-Image
-    refined_img, zimage_stats = run_zimage(flux_img, refine_prompt, seed=args.seed)
-    refined_path = str(OUT_DIR / "02_zimage_refined.png")
+    # ── S-07: Z-Image ───────────────────────────────────────────────────────────
+    _, s07_stats = run_s07_zimage(base_img, refine_prompt, seed=args.seed)
+    del base_img  # free memory
+    refined_path = str(OUT_DIR / "S07_refined_image.png")
 
-    # Step 3: WAN2.2 (unless --image-only)
-    video_path = None
-    if not args.image_only:
-        video_path = run_wan22(
-            image_path=refined_path,
+    # ── Video stages ─────────────────────────────────────────────────────────────
+    video_segments: list[str | None] = []
+
+    if args.image_only:
+        log.info("━━━ Video generation SKIPPED (--image-only) ━━━")
+    else:
+        # S-08: first segment (I2V from image)
+        s08_path = run_s08_wan22(
+            refined_image_path=refined_path,
             prompt=args.prompt,
             precision=args.precision,
             steps=args.steps,
@@ -456,22 +578,41 @@ def main() -> int:
             svi_python=args.svi_python,
             seed=args.seed,
         )
-    else:
-        log.info("--- Step 3: WAN2.2 SKIPPED (--image-only) ---")
+        video_segments.append(s08_path)
 
-    # Report
-    write_report(args, args.prompt, flux_stats, zimage_stats, video_path)
+        if s08_path is None:
+            log.error("S-08 failed — cannot run S-09 without a valid first segment.")
+        else:
+            # S-09: continuation segments
+            prev_path = s08_path
+            for i in range(args.segments):
+                seg_num = i + 2   # segment 002, 003, ...
+                s09_path = run_s09_svi(
+                    prev_segment_path=prev_path,
+                    refined_image_path=refined_path,
+                    segment_num=seg_num,
+                    prompt=args.prompt,
+                    precision=args.precision,
+                    steps=args.steps,
+                    cfg=args.cfg,
+                    svi_python=args.svi_python,
+                    seed=args.seed,
+                )
+                video_segments.append(s09_path)
+                if s09_path:
+                    prev_path = s09_path  # next continuation uses this segment as input
+
+    # ── Report ────────────────────────────────────────────────────────────────────
+    write_report(args, args.prompt, s05_stats, s07_stats, video_segments)
 
     log.info("=" * 60)
-    log.info("Test complete. Outputs in %s", OUT_DIR)
-    log.info("  01_flux.png          — FLUX base image")
-    log.info("  02_zimage_refined.png — Z-Image refined (guidance=0.0 FIXED)")
-    if video_path:
-        log.info("  03_segment.mp4       — WAN2.2 video (sigma_shift=5.0 FIXED)")
-    log.info("  test_report.txt      — full stats + interpretation")
+    log.info("Test complete.")
+    log.info("  Output dir:  %s", OUT_DIR)
+    log.info("  To download: python3 scripts/download_test_outputs.py")
     log.info("=" * 60)
 
-    return 0 if (args.image_only or video_path is not None) else 1
+    failed = any(p is None for p in video_segments)
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
