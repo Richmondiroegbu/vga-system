@@ -675,18 +675,16 @@ def run_inference(pipe: "WanVideoSviPipeline", config: dict) -> dict:
     full_prompt = (
         f"{prompt}, {camera_motion}, motion: {motion_vector}, "
         "natural human movement, expressive gestures, dynamic body language, "
-        "vivid colors, high contrast, sharp detail, cinematic quality, photorealistic"
+        "cinematic quality, photorealistic"
     )
-    # Added anti-static and anti-dim terms to reinforce motion and exposure quality.
     negative_prompt = (
         "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，"
         "最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，"
         "画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，"
         "杂乱的背景，三条腿，背景人很多，倒着走，"
-        "frozen pose, no movement, static character, dim lighting, underexposed, "
-        "dark frame, hazy, foggy, low visibility, washed out, faded, "
-        "desaturated, sepia tone, sepia filter, grayscale, black and white, monochrome, "
-        "color faded, dull colors, muted colors, color drained"
+        "frozen pose, no movement, static character, "
+        "overexposed, oversaturated, blown highlights, washed out, color bleed, "
+        "desaturated, sepia tone, sepia filter, grayscale, black and white, monochrome"
     )
 
     try:
