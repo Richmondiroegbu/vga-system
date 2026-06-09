@@ -368,7 +368,9 @@ def _run_svi_inference(
     env = os.environ.copy()
     env["WAN22_PRECISION"] = precision
     env["WAN22_BF16_DIR"] = WAN22_BF16_PATH
-    env["SVI_GPU_RESIDENT"] = "1"
+    # GPU-resident FP8 needs T5(4.4GB) + VAE(1.4GB) + 2×DiT(14.3GB each) = 34.4GB.
+    # RTX 5090 has 32GB — must CPU-offload. A6000 48GB fits everything on GPU.
+    env["SVI_GPU_RESIDENT"] = "0" if precision == "fp8" else "1"
     env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
     log.info("  Running SVI inference (takes several minutes) ...")
